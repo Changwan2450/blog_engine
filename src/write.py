@@ -17,8 +17,10 @@ Blog article structure:
   ## BLOG ARTICLE (KR)
   Hook (2 lines)
   ---
+  ## TL;DR
+  ## Why it matters
   ## 핵심 주장 (Thesis)
-  ## 무엇이 달라졌고 왜 중요한가
+  ## 변화의 핵심
   ## 실전 체크리스트
   ## 실패 사례와 한계
   ## 결론
@@ -41,6 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from summarize import TopicSummary, _heuristic_topic_kr
@@ -277,6 +280,7 @@ _GENERIC_EVIDENCE_RE = re.compile(
     re.IGNORECASE,
 )
 _METADATA_FRAGMENT_RE = re.compile(r"(관련\s*기술/기업:|출처:|URL\s*컨텍스트:)", re.IGNORECASE)
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _QUOTE_TRANSLATION = str.maketrans({
     "“": '"',
     "”": '"',
@@ -287,6 +291,14 @@ _QUOTE_TRANSLATION = str.maketrans({
 
 def _normalise_quotes(text: str) -> str:
     return text.translate(_QUOTE_TRANSLATION)
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return text[:limit]
+    return text[:limit - 1].rstrip() + "…"
 
 
 def _extract_evidence(summary_text: str) -> list[str]:
@@ -367,9 +379,9 @@ def _cap_topic_repetitions(text: str, topic: str, topic_kr: str, limit: int = 2)
 
     capped = _normalise_quotes(text)
     if topic:
-        capped = _cap_phrase(capped, topic, topic_kr or "이 주제", ignore_case=True)
+        capped = _cap_phrase(capped, topic, topic_kr or "해당 기술", ignore_case=True)
     if topic_kr:
-        capped = _cap_phrase(capped, topic_kr, "이 주제", ignore_case=False)
+        capped = _cap_phrase(capped, topic_kr, "해당 기술", ignore_case=False)
     return capped
 
 
@@ -461,7 +473,7 @@ def _build_thesis(hook: str, lens_id: str, topic: str, domain_angle: str) -> str
 
 
 def _build_why_it_matters(topic: str, facts: list[str], domain_angle: str) -> str:
-    lines = ["## 무엇이 달라졌고, 왜 중요한가", "",
+    lines = ["## 변화의 핵심", "",
              "'" + topic + "'을 둘러싼 환경은 최근 6개월간 구조적으로 변했다.", ""]
     if facts:
         lines.append("실전 근거:")
@@ -574,6 +586,67 @@ def _build_closing(hook: str, topic: str, domain_angle: str) -> str:
     return "\n".join(lines)
 
 
+def _build_tldr(topic_kr: str, key_claims: list[dict]) -> str:
+    base = topic_kr or "핵심 기술 변화"
+    if key_claims:
+        first = str(key_claims[0].get("claim", "")).strip()
+        if first:
+            return "## TL;DR\n\n" + _truncate_text(first, 120)
+    return "## TL;DR\n\n" + _truncate_text(base + "의 성패는 도입 속도보다 운영 설계의 정밀도에서 갈린다.", 120)
+
+
+def _build_why_it_matters_fixed(topic_kr: str, key_claims: list[dict], domain_angle: str) -> str:
+    lines = ["## Why it matters", ""]
+    first_ev = ""
+    if key_claims:
+        evs = key_claims[0].get("evidence", []) or []
+        if evs:
+            first_ev = str(evs[0]).strip()
+    lines.append(f"{topic_kr} 흐름은 기능 경쟁이 아니라 운영 비용 구조를 재편한다.")
+    if first_ev:
+        lines.append(_truncate_text(f"관찰 가능한 신호는 '{first_ev}' 같은 구체 근거로 확인된다.", 140))
+    lines.append(_truncate_text(domain_angle + " 관점에서 보면, 도입 속도보다 검증 가능한 루프 설계가 성과를 가른다.", 140))
+    return "\n".join(lines)
+
+
+def _build_sources_section(summary_urls: list[str], key_claims: list[dict]) -> str:
+    lines = ["## 근거/출처", ""]
+
+    seen_domains: set[str] = set()
+    src_lines: list[str] = []
+    for u in summary_urls:
+        if not u:
+            continue
+        d = urlparse(u).netloc.replace("www.", "")
+        if not d or d in seen_domains:
+            continue
+        seen_domains.add(d)
+        src_lines.append(f"- {d}: {u}")
+        if len(src_lines) >= 4:
+            break
+    if not src_lines:
+        src_lines.append("- 공개 링크 기반 근거가 제한적이므로 운영 관찰 중심으로 해석했다.")
+
+    ev_lines: list[str] = []
+    for kc in key_claims:
+        for ev in kc.get("evidence", []) or []:
+            t = str(ev).strip()
+            if not t or _METADATA_FRAGMENT_RE.search(t):
+                continue
+            ev_lines.append("- " + _truncate_text(t, 130))
+            if len(ev_lines) >= 2:
+                break
+        if len(ev_lines) >= 2:
+            break
+
+    lines.extend(src_lines[:4])
+    if ev_lines:
+        lines.append("")
+        lines.append("근거 스니펫:")
+        lines.extend(ev_lines)
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # X thread template (fallback)
 # ---------------------------------------------------------------------------
@@ -600,6 +673,72 @@ def _build_x_thread_template(topic: str, lens_id: str, hook: str, domain_angle: 
     return "\n\n".join(tweets)
 
 
+def _parse_thread_tweets(thread_text: str) -> list[str]:
+    tweets: list[str] = []
+    current: list[str] = []
+    for raw in (thread_text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if re.match(r"^\d+/", line):
+            if current:
+                tweets.append(" ".join(current).strip())
+                current = []
+            current.append(re.sub(r"^\d+/\s*", "", line))
+        else:
+            current.append(line)
+    if current:
+        tweets.append(" ".join(current).strip())
+
+    if not tweets:
+        chunks = [c.strip() for c in re.split(r"\n\s*\n", thread_text or "") if c.strip()]
+        tweets = chunks
+    return tweets
+
+
+def _truncate_tweet(body: str, num: int, max_len: int = 240) -> str:
+    prefix = f"{num}/ "
+    allowed = max_len - len(prefix)
+    text = body.strip()
+    if len(prefix + text) <= max_len:
+        return prefix + text
+    return prefix + _truncate_text(text, max(8, allowed))
+
+
+def _enforce_x_limits(thread_text: str) -> str:
+    tweets = _parse_thread_tweets(thread_text)
+    if len(tweets) < 7:
+        tweets.extend(["Measure one loop at a time before scaling."] * (7 - len(tweets)))
+    if len(tweets) > 9:
+        tweets = tweets[:9]
+
+    # Links only in last tweet.
+    found_links: list[str] = []
+    clean_tweets: list[str] = []
+    for t in tweets:
+        links = _URL_RE.findall(t)
+        found_links.extend(links)
+        clean = _URL_RE.sub("", t)
+        clean = re.sub(r"\s{2,}", " ", clean).strip()
+        clean_tweets.append(clean)
+
+    if found_links:
+        link_tail = " ".join(found_links[:2])
+        clean_tweets[-1] = (clean_tweets[-1] + " " + link_tail).strip()
+
+    out = [_truncate_tweet(body, i + 1, max_len=240) for i, body in enumerate(clean_tweets)]
+    return "\n\n".join(out)
+
+
+def _enforce_x_limits_on_full_output(text: str) -> str:
+    marker = "## X THREAD (EN copy/paste)"
+    if marker not in text:
+        return text
+    head, tail = text.split(marker, 1)
+    limited = _enforce_x_limits(tail.strip())
+    return head.rstrip() + "\n\n" + marker + "\n\n" + limited
+
+
 # ---------------------------------------------------------------------------
 # Assemble full article body (blog + X thread)
 # ---------------------------------------------------------------------------
@@ -617,6 +756,7 @@ def _build_article(
     topic_angle: str = "",
     source_urls: list[str] | None = None,
     summary_key_points: list[str] | None = None,
+    key_claims: list[dict] | None = None,
 ) -> str:
     """Assemble blog article + X thread.
 
@@ -662,6 +802,8 @@ def _build_article(
         "K": "케이스 스터디 구조. 실제 사례의 원인-결과-교훈을 연결한다",
     }
 
+    safe_claims = list(key_claims or [])
+
     if facts:
         facts_block = "\n\n배경 정보 (분석에 녹여낼 것):\n" + "\n".join("- " + f for f in facts)
     else:
@@ -684,23 +826,27 @@ def _build_article(
         "규칙:\n"
         "- 800~1200단어 분량의 분석 에세이 (뉴스 요약 금지)\n"
         '- 제목/본문에서 "' + topic + '" 원문 표현은 최대 2회. 이후엔 "' + t_kr + '" 또는 동의어 사용.\n'
-        '- "정리", "최근 동향", "소개" 표현 사용 금지\n'
+        '- "정리", "최근 동향", "소개", "무엇이 달라졌고" 표현 사용 금지\n'
         "- 플레이스홀더 문장 금지 — 모든 문장이 구체적이고 실질적이어야 함\n"
         "- 반드시 다음 구조를 포함:\n"
+        "  ## TL;DR\n"
+        "  ## Why it matters\n"
         "  ## 핵심 주장 (Thesis)\n"
-        "  ## 무엇이 달라졌고 왜 중요한가\n"
+        "  ## 변화의 핵심\n"
         "  ## 실전 체크리스트\n"
         "  ## 실패 사례와 한계\n"
         "  ## 결론: 남는 한 마디\n"
+        "  ## 근거/출처\n"
         "- 체크리스트는 `- [ ]` 형식으로 3~7개 항목\n"
         "- 서두는 2줄짜리 훅으로 시작, 그 다음 `---` 구분선\n"
         "- 다른 초안과 완전히 다른 관점/사례/비유를 사용할 것\n\n"
         "=== 파트 2: 영어 X 스레드 ===\n\n"
         "규칙:\n"
-        "- 7~9개 트윗, 각 260자 이하\n"
+        "- 7~9개 트윗, 각 240자 이하\n"
         "- 번호 형식: 1/ 2/ 3/ ...\n"
         "- 1번: 강한 훅 (topic과 같은 표현 반복 금지)\n"
         "- 반드시 포함: 구체적 사례 1개, 체크리스트 트윗 1개, 한계/실패 트윗 1개\n"
+        "- 링크는 마지막 트윗(또는 마지막 2개 트윗)에만 배치\n"
         "- 마지막 트윗: CTA (call to action)\n"
         "- 블로그 글을 요약하지 말고, 독립적으로 읽히는 스레드로 작성\n\n"
         "=== 출력 형식 ===\n\n"
@@ -717,14 +863,20 @@ def _build_article(
         try:
             result = _call_llm(
                 system_prompt=(
-                    "당신은 한국어 테크 블로그 작가이자 영어 X(Twitter) 콘텐츠 전략가입니다. "
-                    "통찰력 있는 분석 에세이와 임팩트 있는 트윗 스레드를 작성합니다."
+                    "Write a technology article that is insightful, slightly provocative, "
+                    "and understandable even to non-experts. "
+                    "Tone: an engineer explaining a surprising insight. "
+                    "Avoid generic AI blog phrases. "
+                    "Start with a surprising observation, explain hidden mechanism, "
+                    "show one concrete example, then end with a forward-looking insight. "
+                    "The output should feel like a sharp tech insight someone would share on X."
                 ),
                 user_prompt=prompt,
                 max_tokens=3500,
             )
             if len(result) >= 900:
                 result = _cap_topic_repetitions(result, topic, t_kr, limit=2)
+                result = _enforce_x_limits_on_full_output(result)
                 return result
             print("[write] WARN  LLM output too short (%d chars); using template" % len(result),
                   file=sys.stderr)
@@ -734,19 +886,22 @@ def _build_article(
 
     # Template fallback
     hook_text = _build_hook(hook, t_kr, topic_hint, facts)
+    tldr = _build_tldr(t_kr, safe_claims)
+    why_fixed = _build_why_it_matters_fixed(t_kr, safe_claims, domain_angle)
     thesis = _build_thesis(hook, lens_id, t_kr, domain_angle)
     why = _build_why_it_matters(t_kr, facts, domain_angle)
     checklist = _build_checklist(structure, t_kr)
     failures = _build_failure_cases(hook, lens_id, t_kr)
     closing = _build_closing(hook, t_kr, domain_angle)
+    sources_sec = _build_sources_section(source_urls or [], safe_claims)
 
     blog_section = "\n\n".join([
         "## BLOG ARTICLE (KR)", "",
         hook_text, "---",
-        thesis, why, checklist, failures, closing,
+        tldr, why_fixed, thesis, why, checklist, failures, closing, sources_sec,
     ])
 
-    x_thread = _build_x_thread_template(t_kr, lens_id, hook, domain_angle)
+    x_thread = _enforce_x_limits(_build_x_thread_template(t_kr, lens_id, hook, domain_angle))
     x_section = "## X THREAD (EN copy/paste)\n\n" + x_thread
     full_text = blog_section + "\n\n---\n\n" + x_section
     return _cap_topic_repetitions(full_text, topic, t_kr, limit=2)
@@ -771,6 +926,7 @@ def generate_drafts(
     chosen = random.sample(all_combos, min(count, len(all_combos)))
 
     evidence = list(getattr(summary, "key_points", []) or [])
+    key_claims = list(getattr(summary, "key_claims", []) or [])
 
     # Select unique hook templates per draft for diversity
     hook_templates: list[str] = []
@@ -804,6 +960,7 @@ def generate_drafts(
             topic_angle=topic_angle,
             source_urls=summary.source_urls,
             summary_key_points=evidence,
+            key_claims=key_claims,
         )
 
         hid  = _make_hook_id(narrative_angle, hook_templates) if narrative_angle else ""
