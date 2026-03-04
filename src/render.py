@@ -28,10 +28,13 @@ def make_timestamp() -> str:
 # Title helper
 # ---------------------------------------------------------------------------
 
-def _fit_title(raw_title: str, min_len: int = 26, max_len: int = 34) -> str:
-    """Best-effort fit to Naver's 26–34 character guideline."""
+def _fit_title(raw_title: str, min_len: int = 26, max_len: int = 45) -> str:
+    """Best-effort fit to title length guideline (raised to 45 for Korean headlines)."""
     if len(raw_title) > max_len:
-        return raw_title[: max_len - 1] + "…"
+        # Break at last space before limit to avoid mid-word cuts
+        cut = raw_title[:max_len - 1]
+        sp = cut.rfind(" ")
+        return (cut[:sp] if sp > max_len // 3 else cut) + "…"
     return raw_title
 
 

@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,7 +43,7 @@ from typing import List
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from summarize import TopicSummary
+from summarize import TopicSummary, _heuristic_topic_kr
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +254,70 @@ def generate_text(prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Evidence extraction + topic repetition cap
+# ---------------------------------------------------------------------------
+
+_NO_EVIDENCE_NOTICE = (
+    "현재 공개된 정보는 제한적이며, "
+    "아래는 관찰 가능한 패턴 중심으로 정리한다."
+)
+
+_NUM_CTX_RE = re.compile(
+    r"\b(\d[\d,]*(?:\.\d+)?)\s*"
+    r"(?:engineers?|employees?|users?|teams?|companies|repos?|requests?|tokens?|"
+    r"%|percent|ms|seconds?|days?|months?|billion|million|thousand|B\b|M\b|K\b)",
+    re.IGNORECASE,
+)
+_QUOTE_CTX_RE = re.compile(r'"([^"]{10,100})"')
+
+
+def _extract_evidence(summary_text: str) -> list[str]:
+    """Extract 2-3 concrete facts from summary text. Returns [] if nothing found."""
+    facts: list[str] = []
+
+    for m in _QUOTE_CTX_RE.finditer(summary_text):
+        facts.append('"' + m.group(1) + '"')
+        if len(facts) >= 2:
+            break
+
+    for m in _NUM_CTX_RE.finditer(summary_text):
+        start = max(0, m.start() - 35)
+        end = min(len(summary_text), m.end() + 35)
+        snippet = re.sub(r"\s+", " ", summary_text[start:end]).strip()
+        if len(snippet) > 18:
+            facts.append(snippet)
+        if len(facts) >= 3:
+            break
+
+    if not facts:
+        sentences = re.split(r"(?<=[.!?])\s+", summary_text.strip())
+        for s in sentences:
+            s = s.strip()
+            if len(s) > 40:
+                facts.append(s)
+            if len(facts) >= 2:
+                break
+
+    return facts[:3]
+
+
+def _cap_topic_repetitions(text: str, topic: str, topic_kr: str, limit: int = 2) -> str:
+    """Replace occurrences of raw topic beyond `limit` with topic_kr."""
+    if not topic:
+        return text
+    pattern = re.compile(re.escape(topic), re.IGNORECASE)
+    count = [0]
+
+    def _repl(m: re.Match) -> str:
+        count[0] += 1
+        if count[0] <= limit:
+            return m.group(0)
+        return topic_kr if topic_kr else m.group(0)
+
+    return pattern.sub(_repl, text)
+
+
+# ---------------------------------------------------------------------------
 # Research patterns loader
 # ---------------------------------------------------------------------------
 
@@ -339,17 +404,20 @@ def _build_thesis(hook: str, lens_id: str, topic: str, domain_angle: str) -> str
     ])
 
 
-def _build_why_it_matters(topic: str, evidence: list[str], domain_angle: str) -> str:
+def _build_why_it_matters(topic: str, facts: list[str], domain_angle: str) -> str:
     lines = ["## 무엇이 달라졌고, 왜 중요한가", "",
-             f"'{topic}'을 둘러싼 환경은 최근 6개월간 구조적으로 변했다.", ""]
-    if evidence:
+             "'" + topic + "'을 둘러싼 환경은 최근 6개월간 구조적으로 변했다.", ""]
+    if facts:
         lines.append("실전 근거:")
         lines.append("")
-        for i, ev in enumerate(evidence[:4], 1):
-            lines.append(f"{i}. {ev}")
+        for ev in facts[:4]:
+            lines.append("- " + ev)
+        lines.append("")
+    else:
+        lines.append(_NO_EVIDENCE_NOTICE)
         lines.append("")
     lines.extend([
-        f"이 변화의 핵심은 {domain_angle}에 있다. "
+        "이 변화의 핵심은 " + domain_angle + "에 있다. "
         "단순히 새로운 도구가 등장한 것이 아니라, "
         "기존 운영 비용 구조가 더 이상 지속 불가능해졌다는 점이다.", "",
         "결국 문제는 '도입 여부'가 아니라 '어떤 설계로 도입하느냐'다.",
@@ -489,16 +557,23 @@ def _build_article(
     evidence: list[str],
     research_patterns: dict | None = None,
     narrative_angle: str = "",
+    topic_kr: str = "",
+    topic_angle: str = "",
+    source_urls: list[str] | None = None,
+    summary_key_points: list[str] | None = None,
 ) -> str:
     """Assemble blog article + X thread.
 
     When OPENAI_API_KEY is set: sends one rich prompt to LLM.
     Fallback: template sections.
-
-    narrative_angle: unique hook template for this draft (for diversity).
     """
-    domain_angle = _pick_domain_angle(f"{topic}|{lens_id}|{topic_hint}")
+    t_kr = topic_kr or topic
+    domain_angle = _pick_domain_angle(topic + "|" + lens_id + "|" + topic_hint)
     lens = LENSES[lens_id]
+
+    # Build concrete facts from key_points + evidence
+    combined_text = " ".join((summary_key_points or []) + (evidence or []))
+    facts = _extract_evidence(combined_text)
 
     # --- Research patterns context ---
     research_ctx = ""
@@ -506,14 +581,19 @@ def _build_article(
         kw = research_patterns.get("keywords", [])[:15]
         hp = research_patterns.get("hook_patterns", [])[:8]
         if kw:
-            research_ctx += f"\n\n참고 키워드 (자연스럽게 녹일 것): {', '.join(kw)}"
+            research_ctx += "\n\n참고 키워드 (자연스럽게 녹일 것): " + ", ".join(kw)
         if hp:
-            research_ctx += f"\n인기 훅 스타일: {', '.join(hp)}"
+            research_ctx += "\n인기 훅 스타일: " + ", ".join(hp)
 
     narrative_line = ""
     if narrative_angle:
-        concrete = narrative_angle.replace("{topic}", topic).replace("{metric}", "ROI")
-        narrative_line = f"\n\n이 글의 서사적 각도 (hook): \"{concrete}\"\n이 문장을 그대로 쓰지 말고, 이 방향성에 맞는 독창적인 훅을 작성할 것."
+        concrete = narrative_angle.replace("{topic}", t_kr).replace("{metric}", "ROI")
+        narrative_line = (
+            '\n\n이 글의 서사적 각도 (hook): "' + concrete + '"\n'
+            "이 문장을 그대로 쓰지 말고, 이 방향성에 맞는 독창적인 훅을 작성할 것."
+        )
+
+    angle_line = ("\n\n분석 각도: " + topic_angle) if topic_angle else ""
 
     hook_style = {
         "Q": "도발적인 질문으로 시작: 왜 이것이 기대만큼 효과가 없는가?",
@@ -526,60 +606,54 @@ def _build_article(
         "K": "케이스 스터디 구조. 실제 사례의 원인-결과-교훈을 연결한다",
     }
 
-    evidence_lines = ""
-    if evidence:
-        ev_items = "\n".join(f"- {e}" for e in evidence[:5])
-        evidence_lines = f"\n\n배경 정보 (분석에 녹여낼 것):\n{ev_items}"
+    if facts:
+        facts_block = "\n\n배경 정보 (분석에 녹여낼 것):\n" + "\n".join("- " + f for f in facts)
+    else:
+        facts_block = '\n\n배경 정보 없음. 다음 문장으로 한계를 명시할 것: "' + _NO_EVIDENCE_NOTICE + '"'
 
     hint_line = ""
     if topic_hint and topic_hint.lower() not in topic.lower():
-        hint_line = f"\n\n추가 렌즈: '{topic_hint}' 관점도 자연스럽게 포함할 것."
+        hint_line = "\n\n추가 렌즈: '" + topic_hint + "' 관점도 자연스럽게 포함할 것."
 
-    prompt = f"""다음 조건에 따라 두 가지 콘텐츠를 한 번에 작성하세요.
-
-주제: {topic}
-분석 렌즈: {lens['label']} 관점 — {lens['question']}
-도메인 각도: {domain_angle}
-훅 스타일: {hook_style.get(hook, hook_style['Q'])}
-본문 구조: {structure_focus.get(structure, structure_focus['T'])}{narrative_line}{evidence_lines}{hint_line}{research_ctx}
-
-=== 파트 1: 한국어 블로그 글 ===
-
-규칙:
-- 800~1200단어 분량의 분석 에세이 (뉴스 요약 금지)
-- "정리", "최근 동향", "소개" 표현 사용 금지
-- 플레이스홀더 문장 금지 — 모든 문장이 구체적이고 실질적이어야 함
-- 반드시 다음 구조를 포함:
-  ## 핵심 주장 (Thesis)
-  ## 무엇이 달라졌고 왜 중요한가
-  ## 실전 체크리스트
-  ## 실패 사례와 한계
-  ## 결론: 남는 한 마디
-- 체크리스트는 `- [ ]` 형식으로 3~7개 항목
-- 서두는 2줄짜리 훅으로 시작, 그 다음 `---` 구분선
-- 다른 초안과 완전히 다른 관점/사례/비유를 사용할 것
-
-=== 파트 2: 영어 X 스레드 ===
-
-규칙:
-- 7~9개 트윗, 각 260자 이하
-- 번호 형식: 1/ 2/ 3/ ...
-- 1번: 강한 훅 (topic과 같은 표현 반복 금지)
-- 반드시 포함: 구체적 사례 1개, 체크리스트 트윗 1개, 한계/실패 트윗 1개
-- 마지막 트윗: CTA (call to action)
-- 블로그 글을 요약하지 말고, 독립적으로 읽히는 스레드로 작성
-
-=== 출력 형식 ===
-
-## BLOG ARTICLE (KR)
-
-<한국어 블로그 글 전체>
-
----
-
-## X THREAD (EN copy/paste)
-
-<영어 X 스레드>"""
+    prompt = (
+        "다음 조건에 따라 두 가지 콘텐츠를 한 번에 작성하세요.\n\n"
+        "주제(영문): " + topic + "\n"
+        "주제(한국어 제목으로 사용): " + t_kr + "\n"
+        "분석 렌즈: " + lens["label"] + " 관점 — " + lens["question"] + "\n"
+        "도메인 각도: " + domain_angle + "\n"
+        "훅 스타일: " + hook_style.get(hook, hook_style["Q"]) + "\n"
+        "본문 구조: " + structure_focus.get(structure, structure_focus["T"])
+        + narrative_line + angle_line + facts_block + hint_line + research_ctx + "\n\n"
+        "=== 파트 1: 한국어 블로그 글 ===\n\n"
+        "규칙:\n"
+        "- 800~1200단어 분량의 분석 에세이 (뉴스 요약 금지)\n"
+        '- 제목/본문에서 "' + topic + '" 원문 표현은 최대 2회. 이후엔 "' + t_kr + '" 또는 동의어 사용.\n'
+        '- "정리", "최근 동향", "소개" 표현 사용 금지\n'
+        "- 플레이스홀더 문장 금지 — 모든 문장이 구체적이고 실질적이어야 함\n"
+        "- 반드시 다음 구조를 포함:\n"
+        "  ## 핵심 주장 (Thesis)\n"
+        "  ## 무엇이 달라졌고 왜 중요한가\n"
+        "  ## 실전 체크리스트\n"
+        "  ## 실패 사례와 한계\n"
+        "  ## 결론: 남는 한 마디\n"
+        "- 체크리스트는 `- [ ]` 형식으로 3~7개 항목\n"
+        "- 서두는 2줄짜리 훅으로 시작, 그 다음 `---` 구분선\n"
+        "- 다른 초안과 완전히 다른 관점/사례/비유를 사용할 것\n\n"
+        "=== 파트 2: 영어 X 스레드 ===\n\n"
+        "규칙:\n"
+        "- 7~9개 트윗, 각 260자 이하\n"
+        "- 번호 형식: 1/ 2/ 3/ ...\n"
+        "- 1번: 강한 훅 (topic과 같은 표현 반복 금지)\n"
+        "- 반드시 포함: 구체적 사례 1개, 체크리스트 트윗 1개, 한계/실패 트윗 1개\n"
+        "- 마지막 트윗: CTA (call to action)\n"
+        "- 블로그 글을 요약하지 말고, 독립적으로 읽히는 스레드로 작성\n\n"
+        "=== 출력 형식 ===\n\n"
+        "## BLOG ARTICLE (KR)\n\n"
+        "<한국어 블로그 글 전체>\n\n"
+        "---\n\n"
+        "## X THREAD (EN copy/paste)\n\n"
+        "<영어 X 스레드>"
+    )
 
     # Try LLM first
     api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -594,31 +668,33 @@ def _build_article(
                 max_tokens=3500,
             )
             if len(result) >= 900:
+                result = _cap_topic_repetitions(result, topic, t_kr, limit=2)
                 return result
-            print(f"[write] WARN  LLM output too short ({len(result)} chars); using template",
+            print("[write] WARN  LLM output too short (%d chars); using template" % len(result),
                   file=sys.stderr)
         except (URLError, KeyError, json.JSONDecodeError, RuntimeError, OSError) as exc:
-            print(f"[write] WARN  LLM call failed ({exc}); using template fallback",
+            print("[write] WARN  LLM call failed (%s); using template fallback" % exc,
                   file=sys.stderr)
 
     # Template fallback
-    hook_text = _build_hook(hook, topic, topic_hint, evidence)
-    thesis = _build_thesis(hook, lens_id, topic, domain_angle)
-    why = _build_why_it_matters(topic, evidence, domain_angle)
-    checklist = _build_checklist(structure, topic)
-    failures = _build_failure_cases(hook, lens_id, topic)
-    closing = _build_closing(hook, topic, domain_angle)
+    hook_text = _build_hook(hook, t_kr, topic_hint, facts)
+    thesis = _build_thesis(hook, lens_id, t_kr, domain_angle)
+    why = _build_why_it_matters(t_kr, facts, domain_angle)
+    checklist = _build_checklist(structure, t_kr)
+    failures = _build_failure_cases(hook, lens_id, t_kr)
+    closing = _build_closing(hook, t_kr, domain_angle)
 
     blog_section = "\n\n".join([
         "## BLOG ARTICLE (KR)", "",
         hook_text, "---",
         thesis, why, checklist, failures, closing,
     ])
+    blog_section = _cap_topic_repetitions(blog_section, topic, t_kr, limit=2)
 
-    x_thread = _build_x_thread_template(topic, lens_id, hook, domain_angle)
-    x_section = f"## X THREAD (EN copy/paste)\n\n{x_thread}"
+    x_thread = _build_x_thread_template(t_kr, lens_id, hook, domain_angle)
+    x_section = "## X THREAD (EN copy/paste)\n\n" + x_thread
 
-    return f"{blog_section}\n\n---\n\n{x_section}"
+    return blog_section + "\n\n---\n\n" + x_section
 
 
 # ---------------------------------------------------------------------------
@@ -653,20 +729,29 @@ def generate_drafts(
                 hook_templates.append(ht)
     random.shuffle(hook_templates)
 
+    topic_angle = getattr(summary, "topic_angle", "") or ""
+
     drafts: list[Draft] = []
     for idx, (arm, lens_id) in enumerate(chosen):
         hook, structure = arm.split("-")
-        title = _build_title(hook, lens_id, summary.topic, topic_hint)
+        # Recompute lens-specific Korean title per-draft for H1 heading diversity.
+        lens_label = LENSES[lens_id]["label"]
+        per_draft_kr = _heuristic_topic_kr(summary.topic, lens_label)
+        title = per_draft_kr  # Korean headline ≤45 chars; used as H1 by render.py
 
-        # Pick a unique narrative angle for this draft
         narrative_angle = hook_templates[idx] if idx < len(hook_templates) else ""
 
-        body = _build_article(hook, structure, lens_id, summary.topic,
-                              topic_hint, evidence, research_patterns,
-                              narrative_angle=narrative_angle)
+        body = _build_article(
+            hook, structure, lens_id, summary.topic,
+            topic_hint, evidence, research_patterns,
+            narrative_angle=narrative_angle,
+            topic_kr=per_draft_kr,
+            topic_angle=topic_angle,
+            source_urls=summary.source_urls,
+            summary_key_points=evidence,
+        )
 
-        # Derive stable hook identity
-        hid = _make_hook_id(narrative_angle, hook_templates) if narrative_angle else ""
+        hid  = _make_hook_id(narrative_angle, hook_templates) if narrative_angle else ""
         hcat = _classify_hook_cat(narrative_angle) if narrative_angle else ""
 
         drafts.append(Draft(
