@@ -165,7 +165,7 @@ def _fetch_google_news_rss(url: str) -> List[SourceItem]:
 
 
 # ---------------------------------------------------------------------------
-# Reddit JSON
+# Reddit JSON (legacy – kept for any remaining .json URLs)
 # ---------------------------------------------------------------------------
 
 def _fetch_reddit_json(url: str) -> List[SourceItem]:
@@ -193,6 +193,38 @@ def _fetch_reddit_json(url: str) -> List[SourceItem]:
             ))
     except (URLError, json.JSONDecodeError, OSError) as exc:
         print(f"[collect] WARN  reddit fetch failed: {url} – {exc}", file=sys.stderr)
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Reddit RSS/Atom (avoids 403 that the JSON API returns to bots)
+# ---------------------------------------------------------------------------
+
+def _fetch_reddit_rss(url: str) -> List[SourceItem]:
+    """Fetch a Reddit subreddit feed via the .rss (Atom) endpoint."""
+    items: List[SourceItem] = []
+    try:
+        data = _read_url(url)
+        root = ET.fromstring(data)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        for entry in root.findall(".//atom:entry", ns):
+            title = (entry.findtext("atom:title", namespaces=ns) or "").strip()
+            link_el = entry.find("atom:link", ns)
+            link = link_el.get("href", "") if link_el is not None else ""
+            pub = (entry.findtext("atom:published", namespaces=ns)
+                   or entry.findtext("atom:updated", namespaces=ns) or "")
+            if not title or not link:
+                continue
+            items.append(SourceItem(
+                title=title,
+                url=link,
+                source="reddit",
+                published_at=pub,
+                language="en",
+                score=60.0,
+            ))
+    except (URLError, ET.ParseError, OSError) as exc:
+        print(f"[collect] WARN  reddit rss fetch failed: {url} – {exc}", file=sys.stderr)
     return items
 
 
@@ -267,6 +299,9 @@ def _dispatch_url(url: str) -> List[SourceItem]:
     if _RE_GOOGLE_NEWS.search(url):
         return _fetch_google_news_rss(url)
     if _RE_REDDIT.search(url):
+        # Use RSS endpoint to avoid 403 that the JSON API returns to bots
+        if ".rss" in url:
+            return _fetch_reddit_rss(url)
         return _fetch_reddit_json(url)
     return _fetch_external_rss(url)
 
@@ -277,7 +312,7 @@ def _dispatch_url(url: str) -> List[SourceItem]:
 
 _FALLBACK_URLS = [
     "https://news.google.com/rss/search?q=AI+agents",
-    "https://www.reddit.com/r/MachineLearning/.json",
+    "https://www.reddit.com/r/MachineLearning/top/.rss?t=day",
 ]
 
 

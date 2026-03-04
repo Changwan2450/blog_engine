@@ -1,20 +1,20 @@
 # LLM / Local AI
-https://www.reddit.com/r/LocalLLaMA/top.json?t=day&limit=25
+https://www.reddit.com/r/LocalLLaMA/top/.rss?t=day
 
 # AI research
-https://www.reddit.com/r/MachineLearning/top.json?t=day&limit=25
+https://www.reddit.com/r/MachineLearning/top/.rss?t=day
 
 # AI discussion
-https://www.reddit.com/r/artificial/top.json?t=day&limit=25
+https://www.reddit.com/r/artificial/top/.rss?t=day
 
 # Future AI discussion
-https://www.reddit.com/r/singularity/top.json?t=day&limit=25
+https://www.reddit.com/r/singularity/top/.rss?t=day
 
 # Programming trends
-https://www.reddit.com/r/programming/top.json?t=day&limit=25
+https://www.reddit.com/r/programming/top/.rss?t=day
 
 # DevOps automation
-https://www.reddit.com/r/devops/top.json?t=week&limit=25
+https://www.reddit.com/r/devops/top/.rss?t=week
 
 # Indie / startup projects
-https://www.reddit.com/r/SideProject/top.json?t=week&limit=25
+https://www.reddit.com/r/SideProject/top/.rss?t=week

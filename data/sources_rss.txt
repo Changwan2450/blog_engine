@@ -6,9 +6,8 @@ https://hnrss.org/frontpage
 https://github.blog/feed/
 https://netflixtechblog.com/feed
 https://engineering.atspotify.com/feed/
-https://eng.uber.com/feed/
 https://dropbox.tech/feed
-https://cloudflare.com/blog/rss/
+https://blog.cloudflare.com/rss/
 
 # Cloud / infra
 https://aws.amazon.com/blogs/aws/feed/
@@ -16,7 +15,6 @@ https://aws.amazon.com/blogs/machine-learning/feed/
 
 # AI research
 https://machinelearning.apple.com/rss.xml
-https://pytorch.org/blog/rss.xml
 https://huggingface.co/blog/feed.xml
 
 # GPU / AI infra
@@ -27,5 +25,4 @@ https://www.latent.space/feed
 https://www.semianalysis.com/feed
 
 # AI tooling blogs
-https://blog.langchain.dev/rss/
 https://openai.com/news/rss.xml
