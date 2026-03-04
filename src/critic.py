@@ -13,6 +13,40 @@ from env_loader import get_model
 _OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 _CRITIC_TIMEOUT = 35
 
+_CRITIC_SYSTEM_PROMPT = """You are a ruthless editor for Korean tech insight posts.
+
+TASK:
+Given a draft, return strict JSON only.
+
+YOU CHECK (HARD):
+1) Opener punchiness (no boring intro).
+2) Any generic reusable lines (flag them).
+3) Micro-story completeness: team size + constraint + failure mode + fix + numeric outcome.
+4) At least 3 concrete operational details exist:
+   (cost cap / retry rule / timeout / SLO / rollout / logs / alerts / canary / queue)
+5) 2–3 quotable hot-take lines exist.
+6) Banned phrase presence must be flagged and rewritten:
+   - 요즘, 최근 몇 년, 신호는 이미, 무엇이 달라졌고, 이 주제, 정리, 소개, 동향
+   - 관련 기술/기업:, 출처:, URL 컨텍스트:
+   - source headline, appears in the source headline, 소스 텍스트에, 단서가 반복된다
+7) List generic sentences that could fit any topic.
+
+OUTPUT JSON SCHEMA (STRICT):
+{
+  "punchline": "string (one sharp line opener suggestion)",
+  "whats_boring": ["string", "... up to 3"],
+  "whats_strong": ["string", "... up to 3"],
+  "rewrite_instructions": ["string", "... 3 to 7 items"],
+  "risk_flags": ["string", "... up to 3"]
+}
+
+RULES:
+- No markdown.
+- No extra keys.
+- rewrite_instructions must be concrete actions, not vague advice.
+
+Now critique the draft and output JSON only."""
+
 
 def _fallback_critique() -> dict:
     return {
@@ -49,13 +83,7 @@ def _call_critic_llm(user_prompt: str) -> str:
     payload = json.dumps({
         "model": get_model("critic"),
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a concise technology writing critic. "
-                    "Return strict JSON only."
-                ),
-            },
+            {"role": "system", "content": _CRITIC_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.3,
@@ -83,23 +111,8 @@ def critique_draft(draft_text: str, topic_kr: str, lens_label: str) -> dict:
         return _fallback_critique()
 
     prompt = (
-        "Analyze this tech draft for insight and voice quality.\n"
         "Topic: " + (topic_kr or "") + "\n"
         "Lens: " + (lens_label or "") + "\n\n"
-        "You must explicitly check:\n"
-        "1) Is the opener punchy enough?\n"
-        "2) Any generic lines that could fit any topic?\n"
-        "3) Does the article include at least 3 concrete operational details?\n"
-        "4) Are there 2-3 quotable hot-take sentences?\n\n"
-        "Return ONLY JSON with keys: punchline, whats_boring, whats_strong, "
-        "rewrite_instructions, risk_flags.\n"
-        "- whats_boring: 1-3 bullets\n"
-        "- whats_strong: 1-3 bullets\n"
-        "- rewrite_instructions: 3-7 bullets\n"
-        "- risk_flags: 0-3 bullets about hallucination/too generic/too rigid/opener-weak/no-hot-takes\n"
-        "- If concrete details are fewer than 3, include that in rewrite_instructions\n"
-        "- If hot-take lines are fewer than 2, include that in rewrite_instructions\n"
-        "No markdown.\n\n"
         "Draft:\n" + draft_text[:6000]
     )
     try:

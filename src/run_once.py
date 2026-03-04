@@ -41,6 +41,9 @@ import json
 import random
 import re
 from typing import Iterable
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from collect import collect_sources, load_source_targets
 from summarize import summarize_items
@@ -284,6 +287,51 @@ def _maybe_run_trends(project_root: Path, items) -> str:
         return ""
 
 
+def _fetch_text(url: str, timeout: int = 10) -> str:
+    req = Request(url, headers={
+        "User-Agent": "BlogEngine/1.0",
+        "Accept": "text/markdown,text/plain,text/html;q=0.9,*/*;q=0.8",
+        "Connection": "close",
+    })
+    with urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="ignore")
+
+
+def _fetch_reader_markdown(original_url: str, timeout: int = 10) -> str:
+    src = (original_url or "").strip()
+    if not src:
+        return ""
+
+    defuddle_url = "https://defuddle.md/" + src
+    try:
+        text = _fetch_text(defuddle_url, timeout=timeout)
+        if len(text.strip()) >= 500:
+            return text
+    except (HTTPError, URLError, OSError, ValueError):
+        pass
+
+    parsed = urlparse(src)
+    no_scheme = src.split("://", 1)[1] if parsed.scheme in {"http", "https"} and "://" in src else src
+    jina_url = "https://r.jina.ai/http://" + no_scheme
+    try:
+        text = _fetch_text(jina_url, timeout=timeout)
+        if len(text.strip()) >= 500:
+            return text
+    except (HTTPError, URLError, OSError, ValueError):
+        return ""
+    return ""
+
+
+def _attach_reader_text(items, max_items: int = 20) -> None:
+    if not items:
+        return
+    ranked = sorted(items, key=lambda x: getattr(x, "score", 0.0), reverse=True)[:max_items]
+    for it in ranked:
+        text = _fetch_reader_markdown(getattr(it, "url", ""), timeout=10)
+        if text:
+            setattr(it, "reader_text", text)
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -320,6 +368,7 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
 
     # --- 4. Summarize ---
     print("[pipeline] 4/9  Summarizing …", file=sys.stderr)
+    _attach_reader_text(items, max_items=20)
     summaries = summarize_items(items, top_n=10)
     if not summaries:
         raise RuntimeError("No summaries generated. Check source inputs.")

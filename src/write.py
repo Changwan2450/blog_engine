@@ -203,6 +203,52 @@ def draft_passes_quality(draft: Draft) -> bool:
 
 _OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 _OPENAI_TIMEOUT = 90  # seconds (longer for full blog+thread)
+_ENABLE_DETEMPLATE_GUARD = True
+
+_WRITER_SYSTEM_PROMPT = """You write Korean tech insight posts that feel like a sharp engineer’s take someone would share on X.
+
+GOAL:
+- Make it interesting even to non-experts.
+- Slightly provocative, but still helpful.
+- No corporate blog tone. No textbook tone.
+
+STYLE RULES (HARD):
+1) Start with a punchy opener (1–2 lines). No “요즘/최근/신호는 이미/무엇이 달라졌고/이 주제/정리/소개/동향”.
+2) Include a micro-story (5–10 lines):
+   - a team (size), a constraint (budget/latency/SLO), a failure (timeout/rollback/cost 폭주), and the lesson.
+3) Include exactly 2 quotable hot-take lines (짧고 세게).
+4) Every paragraph must mention at least one concrete object:
+   - cost cap, retry rule, timeout, SLO, rollout steps, cache, queue, logs, alerts, canary, budget.
+5) If evidence is weak, you MUST say exactly:
+   "근거가 약하다. 그래서 이렇게 확인해라:"
+   and provide exactly 2 verification steps.
+6) Never output metadata fragments:
+   - "관련 기술/기업:" "출처:" "URL 컨텍스트:" "source headline" "appears in the source headline"
+7) Avoid placeholders like "해당 기술", "이 스택" 남발. Use the subject naturally.
+
+OUTPUT FORMAT (HARD):
+## TL;DR
+- Exactly 1 sentence.
+
+## Why it matters
+- 2–3 sentences. Natural Korean.
+
+## Article
+- 5–10 short paragraphs.
+- Must include the micro-story.
+- Must include 2–3 hot-take lines.
+
+## 근거/출처
+- 2–4 bullet links: "domain: url"
+- 1–2 short evidence snippets (quotes or numeric windows), if available.
+
+INPUT YOU RECEIVE:
+- topic_en, topic_kr, lens_label
+- key_claims (claim + evidence + confidence)
+- source_urls, source_domains
+- topic_primary/topic_secondary
+
+Write the post now."""
 
 
 def _call_llm(
@@ -242,8 +288,15 @@ def _call_llm(
     return data["choices"][0]["message"]["content"].strip()
 
 
-def generate_text(prompt: str) -> str:
+def generate_text(prompt: str, hook_line: str | None = None) -> str:
     """Generate text via LLM. Falls back to returning the prompt on error."""
+    if hook_line:
+        prompt = (
+            "The article MUST start with this hook line exactly:\n"
+            + hook_line
+            + "\n\nDo not rewrite it. Continue the article naturally after it.\n\n"
+            + prompt
+        )
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         return prompt
@@ -260,6 +313,11 @@ def generate_text(prompt: str) -> str:
         print(f"[write] WARN  LLM call failed ({exc}); using template fallback",
               file=sys.stderr)
         return prompt
+
+
+def generate_text_with_hook(prompt: str, hook_line: str | None = None) -> str:
+    """Backward-compatible helper for hook-aware text generation."""
+    return generate_text(prompt, hook_line=hook_line)
 
 
 def rewrite_with_feedback(
@@ -326,6 +384,10 @@ _GENERIC_EVIDENCE_RE = re.compile(
 )
 _METADATA_FRAGMENT_RE = re.compile(r"(관련\s*기술/기업:|출처:|URL\s*컨텍스트:)", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_EVIDENCE_ARTIFACT_RE = re.compile(
+    r"(appears in the source headline|source headline|소스 텍스트에|단서가 반복된다)",
+    re.IGNORECASE,
+)
 _QUOTE_TRANSLATION = str.maketrans({
     "“": '"',
     "”": '"',
@@ -344,6 +406,63 @@ def _truncate_text(text: str, limit: int) -> str:
     if limit <= 1:
         return text[:limit]
     return text[:limit - 1].rstrip() + "…"
+
+
+def _clean_evidence_text(text: str) -> str:
+    t = re.sub(_EVIDENCE_ARTIFACT_RE, "", text or "")
+    t = re.sub(r"\s+", " ", t).strip(" ,.;:-")
+    return t
+
+
+def _narrative_evidence_sentence(ev: str, idx: int) -> str:
+    e = _clean_evidence_text(ev)
+    if not e:
+        e = "외부 공개 사례"
+    variants = [
+        f"{e} 케이스를 보면 병목이 코드보다 운영 규칙에서 먼저 터진다.",
+        f"{e}에서도 비용 상한과 복구 규칙을 같이 설계한 팀이 장애 시간을 줄였다.",
+        f"{e} 사례는 retry와 timeout을 늦게 고치면 queue 적체가 바로 커진다는 점을 보여준다.",
+        f"{e}에서 확인된 패턴은 비슷하다: 지표 없이 확장하면 rollback 빈도부터 오른다.",
+        f"{e} 같은 공개 사례를 보면 성능 논쟁보다 운영 제약 설계가 더 먼저 이슈가 된다.",
+    ]
+    return variants[idx % len(variants)]
+
+
+def _detemplate_blog_text(text: str) -> str:
+    if not _ENABLE_DETEMPLATE_GUARD:
+        return text
+
+    banned_patterns = [
+        r"승부는\s*기능\s*비교가\s*아니라",
+        r"도입\s*속도보다",
+        r"\b먼저다\b",
+        r"예를\s*들어",
+        r"요즘",
+        r"최근\s*몇\s*년",
+        r"무엇이\s*달라졌고",
+        r"이\s*주제",
+    ]
+    replacements = [
+        "현장에서 실제로 갈리는 지점은 따로 있다",
+        "대부분 팀이 놓치는 지점은 운영 설계다",
+        "문제의 핵심은 모델이 아니라 실행 구조다",
+    ]
+
+    out = text
+    for p in banned_patterns:
+        if re.search(p, out):
+            out = re.sub(p, random.choice(replacements), out)
+    return out
+
+
+def _detemplate_output_blog_section(full_text: str) -> str:
+    if not _ENABLE_DETEMPLATE_GUARD:
+        return full_text
+    marker = "## X Thread"
+    if marker in full_text:
+        head, tail = full_text.split(marker, 1)
+        return _detemplate_blog_text(head) + marker + tail
+    return _detemplate_blog_text(full_text)
 
 
 def _extract_evidence(summary_text: str) -> list[str]:
@@ -369,7 +488,7 @@ def _extract_evidence(summary_text: str) -> list[str]:
     for m in _COMPANY_CTX_RE.finditer(text):
         phrase = m.group(0).strip()
         if len(phrase) >= 4 and phrase.lower() not in {"the", "this", "that"}:
-            candidates.append(phrase + " appears in the source headline")
+            candidates.append(phrase)
 
     if not candidates:
         return []
@@ -469,12 +588,98 @@ def _build_title(hook: str, lens_id: str, topic: str, topic_hint: str) -> str:
     return base
 
 
+_TITLE_LABEL_SUFFIXES = {
+    "측정 방법", "비용의 함정", "실패의 이유", "운영 이슈", "대안 전략",
+    "시스템 설계 포인트", "핵심 포인트", "대안", "이유",
+}
+
+_PRIMARY_FALLBACK_KR = {
+    "AI Infra": "AI 인프라",
+    "Models": "AI 에이전트",
+    "DevTools": "개발 도구",
+    "Chips": "AI 칩",
+    "Security": "프롬프트 공격",
+    "Web": "웹 자동화",
+    "Product": "제품 운영",
+    "OpenSource": "오픈소스",
+    "Data": "데이터 파이프라인",
+    "Business": "운영 전략",
+}
+
+_TITLE_BAD_START = {"benefits", "how", "why", "what", "when"}
+_TITLE_BAD_END = {"of", "to", "for", "a"}
+
+
+def _english_subject_to_korean(text: str) -> str:
+    low = (text or "").lower()
+    if "agent" in low:
+        return "AI 에이전트"
+    if "prompt" in low and ("attack" in low or "injection" in low):
+        return "프롬프트 공격"
+    if "multi" in low and "agent" in low:
+        return "멀티 에이전트 시스템"
+    if "model" in low:
+        return "AI 모델"
+    return ""
+
+
+def _title_subject(topic_kr: str, fallback: str = "") -> str:
+    t = re.sub(r"\s+", " ", (topic_kr or "").strip())
+    t = t.replace("'", "").replace('"', "")
+    t = re.sub(r"^[^가-힣A-Za-z0-9]+|[^가-힣A-Za-z0-9\s]+$", "", t).strip()
+    if ":" in t:
+        t = t.split(":", 1)[0].strip()
+    for suf in _TITLE_LABEL_SUFFIXES:
+        if t.endswith(suf):
+            t = t[: -len(suf)].rstrip(" -_:/")
+            break
+
+    english_words = re.findall(r"\b[A-Za-z]+\b", t)
+    first_word = english_words[0].lower() if english_words else ""
+    ends_in_bad = bool(re.search(r"\b(of|to|for|a)\s*$", t, re.IGNORECASE))
+    low = " " + t.lower() + " "
+    reject = (
+        (" i " in low)
+        or (" my " in low)
+        or (len(english_words) > 2)
+        or (first_word in _TITLE_BAD_START)
+        or ("'s" in t.lower())
+        or ends_in_bad
+        or bool(re.search(r"\b(a|an|the)\s*$", t, re.IGNORECASE))
+    )
+
+    # Cleanup english headline fragments into Korean subject when possible.
+    if reject:
+        mapped = _english_subject_to_korean(t)
+        if mapped:
+            t = mapped
+            reject = False
+
+    if reject:
+        t = ""
+
+    if not t:
+        t = (fallback or "").strip()
+    if not t:
+        t = "AI 에이전트"
+    return t[:26].strip()
+
+
+def _build_claim_title(topic_kr: str, hook: str, fallback_subject: str = "") -> str:
+    subj = _title_subject(topic_kr, fallback=fallback_subject)
+    if hook == "Q":
+        return f"{subj}에서 사람들이 착각하는 것"
+    if hook == "S":
+        return f"{subj}의 진짜 병목"
+    return f"{subj}가 망하는 진짜 이유"
+
+
 # ---------------------------------------------------------------------------
 # Template builders (fallback when no LLM)
 # ---------------------------------------------------------------------------
 
 def _build_hook(hook: str, topic: str, topic_hint: str, evidence: list[str]) -> str:
-    ev = evidence[0].strip() if evidence else "하루 비용 상한, 실패 복구 규칙, 응답 시간 SLO"
+    ev = _clean_evidence_text(evidence[0]) if evidence else "하루 비용 상한, 실패 복구 규칙, 응답 시간 SLO"
     if hook == "Q":
         return (
             f"'{topic}'이 성능 문제라고 믿는다면, 아마 원인을 잘못 찍었다.\n"
@@ -517,15 +722,11 @@ def _build_why_it_matters(topic: str, facts: list[str], domain_angle: str, weak_
     lines = ["## 변화의 핵심", "",
              "'" + topic + "'의 승패는 기능 개수보다 운영 제약을 먼저 못 박았는지에서 갈린다.", ""]
     if facts:
-        for ev in facts[:4]:
-            lines.append("- " + ev)
+        for i, ev in enumerate(facts[:3]):
+            lines.append(_narrative_evidence_sentence(ev, i))
         lines.append("")
     if weak_evidence or not facts:
         lines.append(_NO_EVIDENCE_NOTICE)
-        lines.append("")
-        lines.append("근거는 약하다. 그래서 이렇게 확인해라")
-        lines.append("1) 7일 동안 요청당 비용/지연/재시도 횟수를 로그로 고정 수집한다.")
-        lines.append("2) 동일 작업을 자동화/수동으로 각각 20건 실행해 실패 모드와 복구 시간을 비교한다.")
         lines.append("")
     lines.extend([
         "이 변화의 핵심은 " + domain_angle + "에 있다. "
@@ -606,12 +807,12 @@ def _build_closing(hook: str, topic: str, domain_angle: str) -> str:
 
 
 def _build_tldr(topic_kr: str, key_claims: list[dict]) -> str:
-    base = topic_kr or "핵심 기술 변화"
-    if key_claims:
-        first = str(key_claims[0].get("claim", "")).strip()
-        if first:
-            return "## TL;DR\n\n" + _truncate_text(first, 120)
-    return "## TL;DR\n\n" + _truncate_text(base + "의 성패는 도입 속도보다 운영 설계의 정밀도에서 갈린다.", 120)
+    subj = _title_subject(topic_kr)
+    sentence = (
+        f"사람들은 {subj}의 성패가 모델 성능 때문이라고 보지만 실제 병목은 비용 상한, "
+        "재시도 규칙, 지연 한도 같은 운영 제약이다."
+    )
+    return "## TL;DR\n\n" + _truncate_text(sentence, 130)
 
 
 def _build_why_it_matters_fixed(
@@ -621,19 +822,30 @@ def _build_why_it_matters_fixed(
     weak_evidence: bool = False,
 ) -> str:
     lines = ["## Why it matters", ""]
+    openers = [
+        f"{topic_kr}는 모델 스펙보다 운영 기준선을 어디에 두는지가 결과를 가른다.",
+        f"{topic_kr}는 화려한 데모보다 budget cap, retry count, timeout 같은 기본값 설계가 더 중요하다.",
+        f"{topic_kr}에서 큰 차이는 기능 수가 아니라 queue depth와 alert rule을 얼마나 빨리 잡느냐에서 난다.",
+        f"{topic_kr}는 속도 싸움처럼 보이지만 실제로는 rollback 규칙과 p95 관리에서 승패가 갈린다.",
+    ]
     first_ev = ""
     if key_claims:
         evs = key_claims[0].get("evidence", []) or []
         if evs:
             first_ev = str(evs[0]).strip()
-    lines.append(f"{topic_kr} 승부는 기능 비교가 아니라 비용/지연/복구 제약을 먼저 잠그는 팀에게 돌아간다.")
+    lines.append(random.choice(openers))
     if first_ev:
-        lines.append(_truncate_text(f"헤드라인 근거: '{first_ev}'처럼 측정 가능한 단서가 있다.", 140))
+        lines.append(_truncate_text(_narrative_evidence_sentence(first_ev, 0), 140))
     if weak_evidence:
-        lines.append("근거는 약하다. 그래서 이렇게 확인해라")
-        lines.append("1) 동일 작업 20건을 자동화/수동으로 나눠 실패 모드와 복구 시간을 비교한다.")
-        lines.append("2) 7일간 건당 비용과 재시도 횟수를 기록해 임계치를 넘는 구간을 찾는다.")
-    lines.append(_truncate_text(domain_angle + " 관점에서 도입 속도보다 운영 루프 설계가 먼저다.", 130))
+        lines.append("근거가 약하다. 그래서 이렇게 확인해라:")
+        lines.append("1) 7일간 p95 latency, retry count, queue depth를 수집해 병목 구간을 수치로 고정한다.")
+        lines.append("2) canary 10%와 전체 배포를 비교해 rollback rate와 alert precision을 계산한다.")
+    closers = [
+        domain_angle + " 관점에서 성능 논쟁보다 운영 루프의 재현성이 더 큰 차이를 만든다.",
+        domain_angle + " 프레임으로 보면 기능 추가보다 SLO/알림 규칙 고정이 실제 장애 시간을 줄인다.",
+        domain_angle + "에서는 빠른 도입보다 계측 가능한 실행 구조를 먼저 갖춘 팀이 덜 흔들린다.",
+    ]
+    lines.append(_truncate_text(random.choice(closers), 130))
     return "\n".join(lines)
 
 
@@ -774,10 +986,14 @@ def _enforce_x_limits(thread_text: str) -> str:
 
 
 def _enforce_x_limits_on_full_output(text: str) -> str:
-    marker = "## X THREAD (EN copy/paste)"
-    if marker not in text:
-        return text
-    head, tail = text.split(marker, 1)
+    marker = "## X Thread"
+    if marker in text:
+        head, tail = text.split(marker, 1)
+    else:
+        legacy = "## X THREAD (EN copy/paste)"
+        if legacy not in text:
+            return text
+        head, tail = text.split(legacy, 1)
     limited = _enforce_x_limits(tail.strip())
     return head.rstrip() + "\n\n" + marker + "\n\n" + limited
 
@@ -800,6 +1016,7 @@ def _build_article(
     source_urls: list[str] | None = None,
     summary_key_points: list[str] | None = None,
     key_claims: list[dict] | None = None,
+    hook_line: str | None = None,
 ) -> str:
     """Assemble blog article + X thread.
 
@@ -873,14 +1090,14 @@ def _build_article(
         "- 뉴스 요약 금지. 숨은 메커니즘 중심의 통찰 글로 작성\n"
         "- 인프라/개발 워크플로우/비용 구조/인센티브 중 최소 2개 축으로 설명\n"
         "- 미시 사례 1개 필수: 한 팀, 한 제약(예산/시간), 한 실패, 한 교훈\n"
-        "- 짧고 도발적인 hot take 문장 2~3개 포함 (X에 바로 인용 가능한 길이)\n"
+        "- 짧고 도발적인 hot take 문장 정확히 2개 포함 (X에 바로 인용 가능한 길이)\n"
         "- 마지막은 바로 써먹는 cheat code 한 줄로 마무리\n"
         "- 각 문단에는 최소 1개의 구체 객체를 넣을 것: 숫자/제약/실패모드/비용/시간/운영 디테일 중 하나\n"
         '- 제목/본문에서 "' + topic + '" 원문 표현은 최대 2회. 이후엔 "' + t_kr + '" 또는 동의어 사용.\n'
         '- 금지 표현: "신호는 이미", "요즘", "최근 몇 년", "무엇이 달라졌고", "이 주제", "정리", "소개", "동향"\n'
         '- 메타데이터 라벨 금지: "출처:", "URL 컨텍스트:", "관련 기술/기업:"\n'
         "- 약한 도발/가벼운 유머는 허용하지만 사실성은 유지\n"
-        "- 근거가 약하면 반드시 이 문장을 포함: '근거는 약하다. 그래서 이렇게 확인해라' + 검증 단계 2개\n"
+        "- 근거가 약하면 반드시 이 문장을 포함: '근거가 약하다. 그래서 이렇게 확인해라:' + 검증 단계 2개\n"
         "- 플레이스홀더 문장 금지 — 모든 문장이 구체적이고 실질적이어야 함\n"
         "- 반드시 다음 구조를 포함:\n"
         "  ## TL;DR\n"
@@ -888,7 +1105,8 @@ def _build_article(
         "  ## Article\n"
         "  ## 근거/출처\n"
         "- 다른 초안과 겹치지 않게 관점/비유를 바꿀 것\n\n"
-        "=== 파트 2: 영어 X 스레드 ===\n\n"
+        + ("- 첫 줄은 반드시 다음 문장을 그대로 사용할 것: " + hook_line + "\n" if hook_line else "")
+        + "=== 파트 2: 영어 X 스레드 ===\n\n"
         "규칙:\n"
         "- 7~9개 트윗, 각 240자 이하\n"
         "- 번호 형식: 1/ 2/ 3/ ...\n"
@@ -901,7 +1119,7 @@ def _build_article(
         "## BLOG ARTICLE (KR)\n\n"
         "<한국어 블로그 글 전체>\n\n"
         "---\n\n"
-        "## X THREAD (EN copy/paste)\n\n"
+        "## X Thread\n\n"
         "<영어 X 스레드>"
     )
 
@@ -910,24 +1128,22 @@ def _build_article(
     if api_key:
         try:
             result = _call_llm(
-                system_prompt=(
-                    "Write in an insight meme voice: sharp, slightly rude-but-helpful, "
-                    "and readable to non-experts. No corporate tone. No textbook tone. "
-                    "Open with a punch that challenges the reader's assumption. "
-                    "Roast bad implementations with concrete operational detail. "
-                    "Every paragraph must include at least one concrete object: number, "
-                    "constraint, failure mode, cost, time estimate, or operational detail. "
-                    "Add 2-3 quotable hot takes. End with one cheat-code takeaway. "
-                    "Never use banned phrases or metadata labels."
-                ),
+                system_prompt=_WRITER_SYSTEM_PROMPT,
                 user_prompt=prompt,
                 max_tokens=3500,
                 stage="write",
             )
             if len(result) >= 900:
+                if hook_line:
+                    blog_marker = "## BLOG ARTICLE (KR)"
+                    if blog_marker in result:
+                        head, rest = result.split(blog_marker, 1)
+                        rest = rest.lstrip()
+                        if not rest.startswith(hook_line):
+                            result = head + blog_marker + "\n\n" + hook_line + "\n\n" + rest
                 result = _cap_topic_repetitions(result, topic, t_kr, limit=2)
                 result = _enforce_x_limits_on_full_output(result)
-                return result
+                return _detemplate_output_blog_section(result)
             print("[write] WARN  LLM output too short (%d chars); using template" % len(result),
                   file=sys.stderr)
         except (URLError, KeyError, json.JSONDecodeError, RuntimeError, OSError) as exc:
@@ -947,7 +1163,7 @@ def _build_article(
 
     blog_section = "\n\n".join([
         "## BLOG ARTICLE (KR)", "",
-        hook_text, "---",
+        hook_line or hook_text, "---",
         tldr, why_fixed,
         "## Article", "",
         thesis, why, checklist, failures, closing,
@@ -955,9 +1171,15 @@ def _build_article(
     ])
 
     x_thread = _enforce_x_limits(_build_x_thread_template(t_kr, lens_id, hook, domain_angle))
-    x_section = "## X THREAD (EN copy/paste)\n\n" + x_thread
+    if hook_line:
+        tweets = _parse_thread_tweets(x_thread)
+        if tweets:
+            tweets[0] = hook_line
+        x_thread = _enforce_x_limits("\n\n".join(f"{i+1}/ {t}" for i, t in enumerate(tweets)))
+    x_section = "## X Thread\n\n" + x_thread
     full_text = blog_section + "\n\n---\n\n" + x_section
-    return _cap_topic_repetitions(full_text, topic, t_kr, limit=2)
+    full_text = _cap_topic_repetitions(full_text, topic, t_kr, limit=2)
+    return _detemplate_output_blog_section(full_text)
 
 
 # ---------------------------------------------------------------------------
@@ -969,6 +1191,7 @@ def generate_drafts(
     count: int = 5,
     topic_hint: str = "",
     research_patterns: dict | None = None,
+    hook_line: str | None = None,
 ) -> List[Draft]:
     """Create *count* draft articles with unique (Arm, Lens) combos.
 
@@ -994,6 +1217,8 @@ def generate_drafts(
     random.shuffle(hook_templates)
 
     topic_angle = getattr(summary, "topic_angle", "") or ""
+    topic_primary = getattr(summary, "topic_primary", "") or "DevTools"
+    primary_fallback = _PRIMARY_FALLBACK_KR.get(topic_primary, "AI 에이전트")
 
     drafts: list[Draft] = []
     for idx, (arm, lens_id) in enumerate(chosen):
@@ -1001,7 +1226,7 @@ def generate_drafts(
         # Recompute lens-specific Korean title per-draft for H1 heading diversity.
         lens_label = LENSES[lens_id]["label"]
         per_draft_kr = _heuristic_topic_kr(summary.topic, lens_label)
-        title = per_draft_kr  # Korean headline ≤45 chars; used as H1 by render.py
+        title = _build_claim_title(per_draft_kr, hook, fallback_subject=primary_fallback)
 
         narrative_angle = hook_templates[idx] if idx < len(hook_templates) else ""
 
@@ -1014,6 +1239,7 @@ def generate_drafts(
             source_urls=summary.source_urls,
             summary_key_points=evidence,
             key_claims=key_claims,
+            hook_line=hook_line,
         )
 
         hid  = _make_hook_id(narrative_angle, hook_templates) if narrative_angle else ""

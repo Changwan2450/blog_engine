@@ -348,10 +348,12 @@ def _confidence_for_claim(claim: str, evidence: list[str]) -> str:
 
 def _build_key_claims(item: SourceItem) -> list[dict]:
     title = item.title.strip()
+    reader_text = str(getattr(item, "reader_text", "") or "")
+    source_text = (title + " " + reader_text[:1600]).strip()
     claims: list[dict] = []
 
     quoted: list[str] = []
-    for m in _QUOTE_RE.finditer(title):
+    for m in _QUOTE_RE.finditer(source_text):
         q = m.group(1).strip()
         if len(q) >= 10:
             quoted.append('"' + q + '"')
@@ -359,16 +361,16 @@ def _build_key_claims(item: SourceItem) -> list[dict]:
             break
 
     numeric_windows: list[str] = []
-    for m in re.finditer(r"\b\d[\d,]*(?:\.\d+)?\s*(?:%|x|X|\+|billion|million|thousand|B\b|M\b|K\b)?", title):
+    for m in re.finditer(r"\b\d[\d,]*(?:\.\d+)?\s*(?:%|x|X|\+|billion|million|thousand|B\b|M\b|K\b)?", source_text):
         st = max(0, m.start() - 28)
-        ed = min(len(title), m.end() + 36)
-        win = re.sub(r"\s+", " ", title[st:ed]).strip(" ,;:-")
+        ed = min(len(source_text), m.end() + 36)
+        win = re.sub(r"\s+", " ", source_text[st:ed]).strip(" ,;:-")
         if len(win) >= 14:
             numeric_windows.append(win)
         if len(numeric_windows) >= 2:
             break
 
-    entities = re.findall(r"\b[A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){0,2}\b", title)
+    entities = re.findall(r"\b[A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){0,2}\b", source_text)
     entities = [e for e in entities if e not in _CAP_SKIP]
 
     if quoted or numeric_windows or entities:
