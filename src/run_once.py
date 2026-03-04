@@ -40,6 +40,7 @@ from typing import Iterable
 from collect import collect_sources, load_source_targets
 from summarize import summarize_items
 from write import generate_drafts, draft_passes_quality
+from research import extract_patterns, load_patterns
 from render import make_timestamp, render_markdown, save_markdown
 from learn import log_run
 
@@ -269,18 +270,26 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
         random.seed(seed)
 
     # --- 1. Collect ---
-    print("[pipeline] 1/8  Collecting sources …", file=sys.stderr)
+    print("[pipeline] 1/9  Collecting sources …", file=sys.stderr)
     merged_sources = _merge_source_files(data_dir)
     items = collect_sources(merged_sources)
     if not items:
         print("[pipeline] WARN  No items collected; using fallback", file=sys.stderr)
 
-    # --- 2. Trends/Topic update (optional) ---
-    print("[pipeline] 2/8  Detecting trends (optional) …", file=sys.stderr)
+    # --- 2. Research (extract writing patterns) ---
+    print("[pipeline] 2/9  Extracting research patterns …", file=sys.stderr)
+    try:
+        research_patterns = extract_patterns(items, data_dir / "research_patterns.json")
+    except Exception as exc:
+        print(f"[research] WARN  Pattern extraction failed ({exc}); skipping", file=sys.stderr)
+        research_patterns = load_patterns(data_dir / "research_patterns.json")
+
+    # --- 3. Trends/Topic update (optional) ---
+    print("[pipeline] 3/9  Detecting trends (optional) …", file=sys.stderr)
     topic_hint = _maybe_run_trends(project_root, items)
 
-    # --- 3. Summarize ---
-    print("[pipeline] 3/8  Summarizing …", file=sys.stderr)
+    # --- 4. Summarize ---
+    print("[pipeline] 4/9  Summarizing …", file=sys.stderr)
     summaries = summarize_items(items, top_n=10)
     if not summaries:
         raise RuntimeError("No summaries generated. Check source inputs.")
@@ -288,16 +297,17 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
     # pick summary using topic hint (if any), otherwise the top summary
     target_summary = _pick_summary_by_topic(summaries, topic_hint)
 
-    # --- 4. Write (3 drafts) with topic_hint ---
-    print("[pipeline] 4/8  Generating 3 drafts …", file=sys.stderr)
-    drafts = generate_drafts(target_summary, count=3, topic_hint=topic_hint)
+    # --- 5. Write (5 drafts) with topic_hint + research ---
+    print("[pipeline] 5/9  Generating 5 drafts …", file=sys.stderr)
+    drafts = generate_drafts(target_summary, count=5, topic_hint=topic_hint,
+                             research_patterns=research_patterns)
 
-    # --- 5. Quality gate (+ optional regen) ---
-    print("[pipeline] 5/8  Quality gate …", file=sys.stderr)
+    # --- 6. Quality gate (+ optional regen) ---
+    print("[pipeline] 6/9  Quality gate …", file=sys.stderr)
     drafts = _quality_gate_with_regen(target_summary, topic_hint, drafts)
 
-    # --- 6. Select (with expanded bandit scoring) ---
-    print("[pipeline] 6/8  Selecting best draft …", file=sys.stderr)
+    # --- 7. Select (with expanded bandit scoring) ---
+    print("[pipeline] 7/9  Selecting best draft …", file=sys.stderr)
     bandit_path = data_dir / "bandit_state.json"
     state = load_bandit_state(bandit_path)
     selected = choose_best_draft(drafts, state, topic_hint=topic_hint)
@@ -307,8 +317,8 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
     state["counts"][selected.arm] = state["counts"].get(selected.arm, 0) + 1
     save_bandit_state(state, bandit_path)
 
-    # --- 7. Render ---
-    print("[pipeline] 7/8  Rendering markdown …", file=sys.stderr)
+    # --- 8. Render ---
+    print("[pipeline] 8/9  Rendering markdown …", file=sys.stderr)
     stamp = make_timestamp()
 
     candidate_dir = out_dir / f"{stamp}_candidates"
@@ -323,8 +333,8 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
     final_md = render_markdown(selected, target_summary, timestamp=stamp)
     final_path = save_markdown(final_md, out_dir / f"{stamp}_final.md")
 
-    # --- 8. Log (include topic_hint and trend terms) ---
-    print("[pipeline] 8/8  Logging run …", file=sys.stderr)
+    # --- 9. Log (include topic_hint and trend terms) ---
+    print("[pipeline] 9/9  Logging run …", file=sys.stderr)
     trend_terms = _load_top_trend_terms(data_dir, max_terms=5)
     log_run(
         data_dir / "runs.jsonl",
@@ -335,6 +345,10 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
         topic_hint=topic_hint,
         trend_terms=trend_terms,
         output_file=str(final_path),
+        extra={
+            "hook_id": getattr(selected, "hook_id", ""),
+            "hook_cat": getattr(selected, "hook_cat", ""),
+        },
     )
 
     return final_path, candidate_paths

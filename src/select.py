@@ -133,10 +133,14 @@ def score_draft(draft, state: dict, topic_hint: str = "") -> float:
       3. ev(term:t1) + ev(term:t2) – term expected values (up to 2)
       4. ev(arm|lens|term:t1) + ev(arm|lens|term:t2) – full combo (up to 2)
       5. domain_bonus             – +0.15 if title/body contains domain term
+      6. ev(hook:<hook_id>)       – hook template expected value
+      7. ev(hookcat:<hook_cat>)   – hook category expected value
+      8. ev(hook:<id>|arm:<arm>)  – hook×arm combo
+      9. ev(hook:<id>|lens:<lens>) – hook×lens combo
 
     Parameters
     ----------
-    draft : write.Draft  (has .arm, .lens, .title, .body attributes)
+    draft : write.Draft  (has .arm, .lens, .title, .body, .hook_id, .hook_cat)
     state : bandit state dict
     topic_hint : optional topic hint string for term matching
     """
@@ -166,6 +170,16 @@ def score_draft(draft, state: dict, topic_hint: str = "") -> float:
     body = getattr(draft, "body", "")
     if _has_domain_term(f"{title} {body}"):
         score += _DOMAIN_BONUS
+
+    # 6-9. Hook-based scoring
+    hook_id = getattr(draft, "hook_id", "")
+    hook_cat = getattr(draft, "hook_cat", "")
+    if hook_id:
+        score += _key_ev(state, hook_id)
+        score += _key_ev(state, f"{hook_id}|arm:{arm}")
+        score += _key_ev(state, f"{hook_id}|lens:{lens}")
+    if hook_cat:
+        score += _key_ev(state, f"hookcat:{hook_cat}")
 
     return score
 

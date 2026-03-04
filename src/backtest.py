@@ -6,6 +6,8 @@ joins them by output_file, and computes average reward per:
   - lens
   - arm|lens
   - term
+  - hook
+  - hookcat
 
 Outputs a console summary and a markdown report to out/backtest_report.md.
 
@@ -104,6 +106,8 @@ def _join_data(
                 "lens": run.get("lens", m.get("lens", "")),
                 "term1": m.get("term1", ""),
                 "term2": m.get("term2", ""),
+                "hook_id": m.get("hook_id", ""),
+                "hook_cat": m.get("hook_cat", ""),
                 "reward": reward,
                 "output_file": out_rel,
                 "timestamp": run.get("timestamp", ""),
@@ -122,6 +126,8 @@ def _aggregate(joined: list[dict]) -> dict[str, dict[str, dict]]:
         "lens": defaultdict(lambda: {"total": 0.0, "count": 0}),
         "arm|lens": defaultdict(lambda: {"total": 0.0, "count": 0}),
         "term": defaultdict(lambda: {"total": 0.0, "count": 0}),
+        "hook": defaultdict(lambda: {"total": 0.0, "count": 0}),
+        "hookcat": defaultdict(lambda: {"total": 0.0, "count": 0}),
     }
 
     for rec in joined:
@@ -147,6 +153,16 @@ def _aggregate(joined: list[dict]) -> dict[str, dict[str, dict]]:
             if t:
                 dims["term"][t]["total"] += reward
                 dims["term"][t]["count"] += 1
+
+        hook_id = rec.get("hook_id", "").strip()
+        if hook_id:
+            dims["hook"][hook_id]["total"] += reward
+            dims["hook"][hook_id]["count"] += 1
+
+        hook_cat = rec.get("hook_cat", "").strip()
+        if hook_cat:
+            dims["hookcat"][hook_cat]["total"] += reward
+            dims["hookcat"][hook_cat]["count"] += 1
 
     # Compute averages
     for dim_data in dims.values():
@@ -176,6 +192,8 @@ def _print_console(dims: dict[str, dict[str, dict]], total_records: int) -> None
         "lens": "Top Lenses",
         "arm|lens": "Top Arm|Lens Combos",
         "term": "Top Terms",
+        "hook": "Top Hooks",
+        "hookcat": "Top Hook Categories",
     }
 
     for dim_name, label in labels.items():
@@ -208,6 +226,8 @@ def _write_report(
         "lens": "Lenses",
         "arm|lens": "Arm|Lens Combos",
         "term": "Terms",
+        "hook": "Hooks",
+        "hookcat": "Hook Categories",
     }
 
     for dim_name, title in sections.items():

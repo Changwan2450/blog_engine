@@ -7,9 +7,12 @@ Expanded bandit keys:
 
 Each key tracks: {"impressions": int, "total_reward": float, "last_updated": str}
 
-Reward formula (Option B – log-normalised to prevent runaway):
-  reward = log1p(views) * 0.25 + likes * 0.05 + comments * 0.1
-  This keeps reward bounded (~2.3 for 10k views) while still differentiating.
+Reward formula:
+  Phase 1 (new blog, low traffic — views < 20):
+    reward = 1.0 if published (human selected this draft)
+    reward is ignored (0.0) if views < 20 and not explicitly published
+  Phase 2 (when views >= 20):
+    reward = log1p(views) * 0.25 + likes * 0.05 + comments * 0.1
 
 Global decay (DECAY = 0.985):
   Applied to ALL state["keys"][*]["total_reward"] BEFORE adding new reward.
@@ -147,17 +150,35 @@ def log_run(
 # Reward calculation (Option B – log-normalised)
 # ---------------------------------------------------------------------------
 
-def compute_reward(views: int = 0, likes: int = 0, comments: int = 0) -> float:
-    """reward = log1p(views) * 0.25 + likes * 0.05 + comments * 0.1
+_MIN_VIEWS_THRESHOLD = 20  # Below this, views are unreliable (new blog phase)
+_PUBLISH_BONUS = 1.0       # Phase 1: reward for human selection/publish
 
-    Option B chosen over linear scaling to prevent runaway weights.
-    Examples:
-      views=100   → log1p(100)*0.25  ≈ 1.15
-      views=1000  → log1p(1000)*0.25 ≈ 1.73
-      views=10000 → log1p(10000)*0.25≈ 2.30
-    Combined with likes/comments the reward stays in a natural [0, ~5] range.
+
+def compute_reward(
+    views: int = 0,
+    likes: int = 0,
+    comments: int = 0,
+    published: bool = False,
+) -> float:
+    """Compute reward using phase-based strategy for new blogs.
+
+    Phase 1 (views < 20, new blog):
+      If published=True: return PUBLISH_BONUS (human selected this draft)
+      Otherwise: return 0.0 (insufficient signal to learn from)
+
+    Phase 2 (views >= 20):
+      reward = log1p(views) * 0.25 + likes * 0.05 + comments * 0.1
+      If published: add PUBLISH_BONUS
     """
-    return math.log1p(views) * 0.25 + likes * 0.05 + comments * 0.1
+    # Phase 1: low traffic — rely on human selection signal only
+    if views < _MIN_VIEWS_THRESHOLD:
+        return _PUBLISH_BONUS if published else 0.0
+
+    # Phase 2: engagement-based reward
+    reward = math.log1p(views) * 0.25 + likes * 0.05 + comments * 0.1
+    if published:
+        reward += _PUBLISH_BONUS
+    return reward
 
 
 # ---------------------------------------------------------------------------
@@ -318,11 +339,14 @@ def update_bandit_expanded(
     lens: str,
     terms: list[str],
     reward: float,
+    hook_id: str = "",
+    hook_cat: str = "",
 ) -> None:
     """Update bandit state for all expanded keys.
 
     1. Apply global decay to all existing keys
     2. Update arm, arm|lens, term:X, arm|lens|term:X keys
+    3. Update hook:<id>, hookcat:<cat>, hook:<id>|arm:<arm>, hook:<id>|lens:<lens>
     """
     state = load_bandit_state(bandit_path)
 
@@ -348,6 +372,14 @@ def update_bandit_expanded(
         combo_key = f"{arm}|{lens}|term:{t}"
         _update_key(state, combo_key, reward)
 
+    # Hook keys (skip gracefully if missing)
+    if hook_id:
+        _update_key(state, hook_id, reward)
+        _update_key(state, f"{hook_id}|arm:{arm}", reward)
+        _update_key(state, f"{hook_id}|lens:{lens}", reward)
+    if hook_cat:
+        _update_key(state, f"hookcat:{hook_cat}", reward)
+
     save_bandit_state(state, bandit_path)
 
 
@@ -357,7 +389,7 @@ def update_bandit_expanded(
 
 _CSV_HEADER = [
     "timestamp", "output_file", "views", "likes", "comments",
-    "reward", "arm", "lens", "term1", "term2",
+    "reward", "arm", "lens", "term1", "term2", "hook_id", "hook_cat",
 ]
 
 
@@ -371,6 +403,8 @@ def _append_metrics_csv(
     arm: str,
     lens: str,
     terms: list[str],
+    hook_id: str = "",
+    hook_cat: str = "",
 ) -> None:
     """Append a row to data/metrics.csv."""
     path = Path(csv_path)
@@ -395,6 +429,8 @@ def _append_metrics_csv(
             lens,
             term1,
             term2,
+            hook_id,
+            hook_cat,
         ])
 
 
@@ -408,6 +444,7 @@ def record_metrics(
     views: int,
     likes: int,
     comments: int,
+    published: bool = False,
 ) -> float:
     """Full metric recording pipeline.
 
@@ -436,23 +473,29 @@ def record_metrics(
         lens = "L1"
         topic = ""
         topic_hint = ""
+        hook_id = ""
+        hook_cat = ""
     else:
         arm = rec.get("arm", "Q-T")
         lens = rec.get("lens", "L1")
         topic = rec.get("topic", "")
         topic_hint = rec.get("topic_hint", "")
+        hook_id = rec.get("hook_id", "")
+        hook_cat = rec.get("hook_cat", "")
 
-    # 2. Reward (log-normalised)
-    reward = compute_reward(views, likes, comments)
+    # 2. Reward (phase-based)
+    reward = compute_reward(views, likes, comments, published=published)
 
     # 3. Terms (quality-filtered, domain-preferred, max 2)
     terms = _extract_attributed_terms(topic, topic_hint, trend_path, max_terms=2)
 
-    # 4. Update bandit (with global decay)
-    update_bandit_expanded(bandit_path, arm, lens, terms, reward)
+    # 4. Update bandit (with global decay + hook keys)
+    update_bandit_expanded(bandit_path, arm, lens, terms, reward,
+                           hook_id=hook_id, hook_cat=hook_cat)
 
     # 5. CSV
-    _append_metrics_csv(csv_path, output_file, views, likes, comments, reward, arm, lens, terms)
+    _append_metrics_csv(csv_path, output_file, views, likes, comments, reward,
+                        arm, lens, terms, hook_id=hook_id, hook_cat=hook_cat)
 
     # 6. Log
     log_run(
@@ -464,7 +507,8 @@ def record_metrics(
         topic=topic,
         topic_hint=topic_hint,
         trend_terms=terms,
-        extra={"views": views, "likes": likes, "comments": comments, "reward": reward},
+        extra={"views": views, "likes": likes, "comments": comments,
+               "reward": reward, "hook_id": hook_id, "hook_cat": hook_cat},
     )
 
     return reward
@@ -485,6 +529,8 @@ if __name__ == "__main__":
     parser.add_argument("--views", type=int, default=0)
     parser.add_argument("--likes", type=int, default=0)
     parser.add_argument("--comments", type=int, default=0)
+    parser.add_argument("--published", action="store_true", default=False,
+                        help="Flag: this draft was selected and published")
     parser.add_argument("--data-dir", default=None, help="Path to data/ directory")
     args = parser.parse_args()
 
@@ -497,5 +543,6 @@ if __name__ == "__main__":
         views=args.views,
         likes=args.likes,
         comments=args.comments,
+        published=args.published,
     )
     print(f"✅  Recorded: output={args.output_file}  reward={reward:.4f}")
