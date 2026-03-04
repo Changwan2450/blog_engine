@@ -332,6 +332,21 @@ def _attach_reader_text(items, max_items: int = 20) -> None:
             setattr(it, "reader_text", text)
 
 
+def _extract_domains(urls: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in urls:
+        try:
+            d = urlparse(u).netloc.lower().replace("www.", "")
+        except Exception:
+            d = ""
+        if not d or d in seen:
+            continue
+        seen.add(d)
+        out.append(d)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -475,6 +490,37 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
         recent_runs=recent_runs,
     )
 
+    # Compute selected score breakdown for dashboard JSON.
+    selected_score = 0.0
+    score_parts: dict[str, float] = {
+        "baseEV": 0.0,
+        "src": 0.0,
+        "nov": 0.0,
+        "dup": 0.0,
+        "slot": 0.0,
+        "viral": 0.0,
+    }
+    if callable(score_draft):
+        try:
+            scored = score_draft(
+                selected,
+                state,
+                topic_hint=topic_hint,
+                summary=target_summary,
+                topic_memory=topic_memory,
+                recent_runs=recent_runs,
+            )
+            if isinstance(scored, tuple):
+                selected_score = float(scored[0])
+                if isinstance(scored[1], dict):
+                    for k, v in scored[1].items():
+                        if k in score_parts and isinstance(v, (int, float)):
+                            score_parts[k] = float(v)
+            elif isinstance(scored, (int, float)):
+                selected_score = float(scored)
+        except Exception:
+            pass
+
     # Update bandit counts for the selected arm
     state.setdefault("counts", {})
     state["counts"][selected.arm] = state["counts"].get(selected.arm, 0) + 1
@@ -495,6 +541,45 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
 
     final_md = render_markdown(selected, target_summary, timestamp=stamp)
     final_path = save_markdown(final_md, out_dir / f"{stamp}_final.md")
+
+    # Dashboard JSON payload
+    first_line = next((ln for ln in final_md.splitlines() if ln.strip()), "")
+    title = first_line[2:].strip() if first_line.startswith("# ") else getattr(selected, "title", "")
+    source_urls = list(getattr(target_summary, "source_urls", []) or [])
+    source_domains = list(getattr(target_summary, "source_domains", []) or [])
+    if not source_domains:
+        source_domains = _extract_domains(source_urls)
+
+    final_json = {
+        "stamp": stamp,
+        "title": title,
+        "topic_primary": getattr(target_summary, "topic_primary", "") or "",
+        "topic_secondary": getattr(target_summary, "topic_secondary", "") or "",
+        "selection_score": round(selected_score, 6),
+        "score_breakdown": {
+            "baseEV": round(score_parts.get("baseEV", 0.0), 6),
+            "source_quality": round(score_parts.get("src", 0.0), 6),
+            "novelty": round(score_parts.get("nov", 0.0), 6),
+            "duplicate_penalty": round(-score_parts.get("dup", 0.0), 6),
+            "slot_bonus": round(score_parts.get("slot", 0.0), 6),
+            "viral_score": round(score_parts.get("viral", 0.0), 6),
+        },
+        "source_urls": source_urls,
+        "source_domains": source_domains,
+        "model_routing": {
+            "summarize": get_model("summarize"),
+            "write": get_model("write"),
+            "critic": get_model("critic"),
+        },
+        "paths": {
+            "final_md": str(final_path.relative_to(project_root)),
+            "candidates_dir": str(candidate_dir.relative_to(project_root)) + "/",
+        },
+    }
+    (out_dir / f"{stamp}_final.json").write_text(
+        json.dumps(final_json, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
     # --- 9. Log (include topic_hint and trend terms) ---
     print("[pipeline] 9/9  Logging run …", file=sys.stderr)
