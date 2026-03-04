@@ -144,3 +144,37 @@ find out/ -type d -empty -delete
 ## 의존성
 
 Python 3.9+ 표준 라이브러리만 사용. 외부 패키지 없음.
+
+---
+
+## 운영 명령어 (Makefile)
+
+```bash
+make run        # 아침 파이프라인
+make evening    # 저녁 파이프라인
+make learn FILE=out/YYYY-MM-DD_HHMM_final.md VIEWS=1000 LIKES=20 COMMENTS=5
+make backtest   # 전략 분석
+make lint       # 문법 검사
+make help       # 명령어 목록
+```
+
+## 운영 루틴
+
+**하루 2회 실행:**
+
+```bash
+make run
+make evening
+```
+
+**다음날 metrics 입력:**
+
+```bash
+make learn FILE=out/YYYY-MM-DD_HHMM_final.md VIEWS=1000 LIKES=20 COMMENTS=5
+```
+
+**주 1회 전략 분석:**
+
+```bash
+make backtest
+```
