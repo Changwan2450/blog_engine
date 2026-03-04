@@ -215,6 +215,22 @@ def _load_top_trend_terms(data_dir: Path, max_terms: int = 5) -> list[str]:
         return []
 
 
+def _load_recent_runs(runs_path: Path, n: int = 60) -> list[dict]:
+    if not runs_path.exists():
+        return []
+    rows = runs_path.read_text(encoding="utf-8").splitlines()
+    out: list[dict] = []
+    for ln in rows[-n:]:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            out.append(json.loads(ln))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Optional: trends integration (guarded import)
 # ---------------------------------------------------------------------------
@@ -335,7 +351,15 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
     print("[pipeline] 7/9  Selecting best draft …", file=sys.stderr)
     bandit_path = data_dir / "bandit_state.json"
     state = load_bandit_state(bandit_path)
-    selected = choose_best_draft(drafts, state, topic_hint=topic_hint)
+    recent_runs = _load_recent_runs(data_dir / "runs.jsonl", n=60)
+    selected = choose_best_draft(
+        drafts,
+        state,
+        topic_hint=topic_hint,
+        summary=target_summary,
+        topic_memory=topic_memory,
+        recent_runs=recent_runs,
+    )
 
     # Update bandit counts for the selected arm
     state.setdefault("counts", {})
@@ -373,6 +397,8 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
         extra={
             "hook_id": getattr(selected, "hook_id", ""),
             "hook_cat": getattr(selected, "hook_cat", ""),
+            "topic_primary": getattr(target_summary, "topic_primary", "DevTools"),
+            "topic_secondary": getattr(target_summary, "topic_secondary", ""),
         },
     )
 

@@ -21,7 +21,9 @@ import json
 import math
 import random
 import re
+import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 # Arm list duplicated here to avoid top-level import of write.py.
@@ -44,6 +46,14 @@ DOMAIN_TERMS: set[str] = {
 }
 
 _DOMAIN_BONUS = 0.15  # small bounded bonus for on-niche drafts
+
+_HIGH_QUALITY_DOMAINS = {
+    "openai.com", "developer.nvidia.com", "aws.amazon.com", "apple.com",
+    "github.blog", "blog.cloudflare.com", "netflixtechblog.com",
+}
+_MED_QUALITY_HINTS = {
+    "engineering", "tech", "developer", "blog", "docs", "ai", "cloud",
+}
 
 
 def _has_domain_term(text: str) -> bool:
@@ -124,7 +134,118 @@ def _extract_topic_tokens(topic_hint: str) -> list[str]:
     return tokens[:5]
 
 
-def score_draft(draft, state: dict, topic_hint: str = "") -> float:
+def _tokenize_text(text: str) -> set[str]:
+    return {m.group(0).lower() for m in _WORD_RE.finditer(text or "")}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return len(a & b) / max(1, len(a | b))
+
+
+def _domain_weight(domain: str) -> float:
+    d = (domain or "").lower().replace("www.", "")
+    if d in _HIGH_QUALITY_DOMAINS:
+        return 0.8
+    if any(h in d for h in _MED_QUALITY_HINTS):
+        return 0.3
+    if d:
+        return 0.05
+    return 0.0
+
+
+def _extract_summary_domains(summary) -> list[str]:
+    doms = list(getattr(summary, "source_domains", []) or [])
+    if doms:
+        return doms
+    urls = list(getattr(summary, "source_urls", []) or [])
+    out: list[str] = []
+    seen: set[str] = set()
+    for u in urls:
+        d = urlparse(u).netloc.lower().replace("www.", "")
+        if not d or d in seen:
+            continue
+        seen.add(d)
+        out.append(d)
+    return out
+
+
+def _score_source_quality(summary) -> float:
+    domains = _extract_summary_domains(summary)
+    if not domains:
+        return 0.0
+    vals = [_domain_weight(d) for d in domains[:4]]
+    return sum(vals) / max(1, len(vals))
+
+
+def _score_novelty(summary, topic_memory: list[dict] | None) -> float:
+    memory = topic_memory or []
+    if not memory:
+        return 0.35
+    cur = _tokenize_text(
+        (getattr(summary, "topic_en", "") or getattr(summary, "topic", ""))
+        + " " + (getattr(summary, "topic_kr", "") or "")
+    )
+    if not cur:
+        return 0.0
+    max_sim = 0.0
+    for rec in memory[-30:]:
+        prev = _tokenize_text(str(rec.get("topic", "")) + " " + str(rec.get("topic_kr", "")))
+        max_sim = max(max_sim, _jaccard(cur, prev))
+    if max_sim >= 0.7:
+        return -0.4
+    if max_sim < 0.35:
+        return 0.35
+    return 0.1
+
+
+def _score_duplication_penalty(summary, topic_memory: list[dict] | None) -> float:
+    memory = topic_memory or []
+    if not memory:
+        return 0.0
+    claims = list(getattr(summary, "key_claims", []) or [])
+    claim_text = " ".join(str(c.get("claim", "")) for c in claims)
+    claim_tokens = _tokenize_text(claim_text)
+    if not claim_tokens:
+        return 0.0
+    mem_tokens: set[str] = set()
+    for rec in memory[-30:]:
+        mem_tokens |= _tokenize_text(str(rec.get("topic", "")) + " " + str(rec.get("topic_kr", "")))
+    overlap = len(claim_tokens & mem_tokens) / max(1, len(claim_tokens))
+    return min(0.6, overlap)
+
+
+def _score_slot_bonus(summary, recent_runs: list[dict] | None) -> float:
+    runs = recent_runs or []
+    cur_primary = (getattr(summary, "topic_primary", "") or "DevTools").strip()
+    if not runs:
+        return 0.15
+    counts: dict[str, int] = {}
+    for r in runs[-50:]:
+        p = str(r.get("topic_primary", "")).strip()
+        if not p:
+            continue
+        counts[p] = counts.get(p, 0) + 1
+    if not counts:
+        return 0.0
+    min_count = min(counts.values())
+    cur_count = counts.get(cur_primary, 0)
+    if cur_count <= min_count:
+        return 0.2
+    return 0.0
+
+
+def score_draft(
+    draft,
+    state: dict,
+    topic_hint: str = "",
+    summary=None,
+    topic_memory: list[dict] | None = None,
+    recent_runs: list[dict] | None = None,
+) -> tuple[float, dict]:
     """Compute a bounded composite score for a draft.
 
     Components (all clamped to [-5, +5]):
@@ -181,14 +302,33 @@ def score_draft(draft, state: dict, topic_hint: str = "") -> float:
     if hook_cat:
         score += _key_ev(state, f"hookcat:{hook_cat}")
 
-    return score
+    src_score = _score_source_quality(summary) if summary is not None else 0.0
+    novelty_score = _score_novelty(summary, topic_memory) if summary is not None else 0.0
+    dup_penalty = _score_duplication_penalty(summary, topic_memory) if summary is not None else 0.0
+    slot_bonus = _score_slot_bonus(summary, recent_runs) if summary is not None else 0.0
+
+    total = score + src_score + novelty_score - dup_penalty + slot_bonus
+    return total, {
+        "baseEV": score,
+        "src": src_score,
+        "nov": novelty_score,
+        "dup": dup_penalty,
+        "slot": slot_bonus,
+    }
 
 
 # ---------------------------------------------------------------------------
 # Selection
 # ---------------------------------------------------------------------------
 
-def choose_best_draft(drafts, state: dict, topic_hint: str = ""):
+def choose_best_draft(
+    drafts,
+    state: dict,
+    topic_hint: str = "",
+    summary=None,
+    topic_memory: list[dict] | None = None,
+    recent_runs: list[dict] | None = None,
+):
     """Epsilon-greedy selection using expanded bandit scoring.
 
     With probability ε, pick a random draft (explore).
@@ -205,6 +345,40 @@ def choose_best_draft(drafts, state: dict, topic_hint: str = ""):
         raise ValueError("No drafts to select from")
 
     if random.random() < _EPSILON:
-        return random.choice(drafts)
+        picked = random.choice(drafts)
+        _score, parts = score_draft(
+            picked,
+            state,
+            topic_hint,
+            summary=summary,
+            topic_memory=topic_memory,
+            recent_runs=recent_runs,
+        )
+        print(
+            "[select] baseEV=%.3f, src=%.3f, nov=%.3f, dup=%.3f, slot=%.3f"
+            % (parts["baseEV"], parts["src"], parts["nov"], parts["dup"], parts["slot"]),
+            file=sys.stderr,
+        )
+        return picked
 
-    return max(drafts, key=lambda d: score_draft(d, state, topic_hint))
+    scored = [
+        (
+            d,
+            *score_draft(
+                d,
+                state,
+                topic_hint,
+                summary=summary,
+                topic_memory=topic_memory,
+                recent_runs=recent_runs,
+            ),
+        )
+        for d in drafts
+    ]
+    best_draft, _best_total, best_parts = max(scored, key=lambda x: x[1])
+    print(
+        "[select] baseEV=%.3f, src=%.3f, nov=%.3f, dup=%.3f, slot=%.3f"
+        % (best_parts["baseEV"], best_parts["src"], best_parts["nov"], best_parts["dup"], best_parts["slot"]),
+        file=sys.stderr,
+    )
+    return best_draft
