@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 
@@ -45,26 +45,129 @@ _DEFAULT_HEADERS = {
     "Connection": "close",
 }
 
+_REDDIT_RSS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, "
+              "text/html;q=0.8, */*;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.reddit.com/",
+    "Cache-Control": "no-cache",
+    "Connection": "close",
+}
+
 _RELAXED_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 
 _REDIRECT_CODES = {301, 302, 307, 308}
+
+_TRACKING_PARAMS = {
+    "ref", "source", "fbclid", "gclid", "mc_cid", "mc_eid", "igshid",
+    "spm", "cmpid", "smid", "si", "feature", "sessionid", "share",
+    "r", "sr", "scid",
+}
+_CANONICAL_ALLOW_PARAMS = {"id", "p", "page", "v", "t"}
+
+_ENABLE_HTML_CANONICAL = True
+_HTML_CANONICAL_MAX = 50
+_HTML_CANONICAL_TIMEOUT = 2
+_CANONICAL_LINK_RE = re.compile(
+    r'<link[^>]+rel=["\']?canonical["\']?[^>]+href=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
 # URL normalisation / canonical key
 # ---------------------------------------------------------------------------
 
+def _is_tracking_param(name: str) -> bool:
+    low = (name or "").lower().strip()
+    return low.startswith("utm_") or low in _TRACKING_PARAMS
+
+
 def _canonical_url(raw: str) -> str:
-    """Strip query params, fragments, trailing slashes; lowercase scheme+host."""
+    """Canonical URL key for dedupe only (does not alter item.url output)."""
     p = urlparse(raw)
+
+    # Normalize query: remove tracking params, keep only small allowlist.
+    kept: list[tuple[str, str]] = []
+    for k, v in parse_qsl(p.query, keep_blank_values=False):
+        lk = (k or "").lower().strip()
+        if _is_tracking_param(lk):
+            continue
+        if lk in _CANONICAL_ALLOW_PARAMS:
+            kept.append((lk, v.strip()))
+    kept.sort(key=lambda x: (x[0], x[1]))
+
+    norm_path = re.sub(r"/{2,}", "/", p.path or "")
     return urlunparse((
         p.scheme.lower(),
         p.netloc.lower(),
-        p.path.rstrip("/"),
+        norm_path.rstrip("/"),
         "",  # params
-        "",  # query
+        urlencode(kept, doseq=True),
         "",  # fragment
     ))
+
+
+def _looks_like_feed_url(url: str) -> bool:
+    low = url.lower()
+    return low.endswith(".rss") or low.endswith(".xml") or "/feed" in low or "atom" in low
+
+
+def _extract_html_canonical(url: str) -> str | None:
+    headers = {
+        "User-Agent": _DEFAULT_HEADERS["User-Agent"],
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": _DEFAULT_HEADERS["Accept-Language"],
+        "Connection": "close",
+    }
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=_HTML_CANONICAL_TIMEOUT) as resp:
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if "html" not in ctype:
+            return None
+        body = resp.read(65536).decode("utf-8", errors="ignore")
+    m = _CANONICAL_LINK_RE.search(body)
+    if not m:
+        return None
+    href = (m.group(1) or "").strip()
+    if not href:
+        return None
+    return urljoin(url, href)
+
+
+def _dedupe_key(
+    item: SourceItem,
+    html_cache: dict[str, str],
+    html_budget: list[int],
+) -> str:
+    """Return canonical dedupe key for item; keeps original item.url untouched."""
+    key = _canonical_url(item.url)
+    if not _ENABLE_HTML_CANONICAL:
+        return key
+    if html_budget[0] <= 0:
+        return key
+    if _looks_like_feed_url(item.url):
+        return key
+
+    if item.url in html_cache:
+        return html_cache[item.url]
+
+    html_budget[0] -= 1
+    try:
+        can = _extract_html_canonical(item.url)
+        if can:
+            html_cache[item.url] = _canonical_url(can)
+            return html_cache[item.url]
+    except (HTTPError, URLError, OSError, ValueError):
+        pass
+
+    html_cache[item.url] = key
+    return key
 
 
 def _normalise_title(text: str) -> str:
@@ -76,14 +179,14 @@ def _normalise_title(text: str) -> str:
 # HTTP fetch helper with redirect following, 406 retry, and 429/5xx retry
 # ---------------------------------------------------------------------------
 
-def _read_url(url: str) -> bytes:
+def _read_url(url: str, headers: dict | None = None) -> bytes:
     """Fetch URL content with robust retry logic.
 
     - 3xx: follows Location header up to 3 hops
     - 406: retry once with relaxed Accept header
     - 429/5xx: retry once after 2-second sleep
     """
-    headers = dict(_DEFAULT_HEADERS)
+    headers = dict(headers or _DEFAULT_HEADERS)
 
     def _fetch(u: str, hdrs: dict) -> bytes:
         with urlopen(Request(u, headers=hdrs), timeout=_TIMEOUT) as resp:
@@ -204,8 +307,17 @@ def _fetch_reddit_json(url: str) -> List[SourceItem]:
 def _fetch_reddit_rss(url: str) -> Tuple[List[SourceItem], bool]:
     """Fetch a Reddit subreddit feed via the .rss (Atom) endpoint."""
     items: List[SourceItem] = []
+    fetch_url = url
     try:
-        data = _read_url(url)
+        try:
+            data = _read_url(fetch_url, headers=_REDDIT_RSS_HEADERS)
+        except HTTPError as exc:
+            if exc.code == 403 and fetch_url.startswith("https://www.reddit.com/"):
+                fetch_url = fetch_url.replace("https://www.reddit.com/", "https://old.reddit.com/", 1)
+                data = _read_url(fetch_url, headers=_REDDIT_RSS_HEADERS)
+            else:
+                raise
+
         root = ET.fromstring(data)
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         for entry in root.findall(".//atom:entry", ns):
@@ -228,9 +340,9 @@ def _fetch_reddit_rss(url: str) -> Tuple[List[SourceItem], bool]:
         if exc.code == 403:
             # Reddit often blocks bot-like RSS requests. Skip silently.
             return [], True
-        print(f"[collect] WARN  reddit rss fetch failed: {url} – {exc}", file=sys.stderr)
+        print(f"[collect] WARN  reddit rss fetch failed: {fetch_url} – {exc}", file=sys.stderr)
     except (URLError, ET.ParseError, OSError) as exc:
-        print(f"[collect] WARN  reddit rss fetch failed: {url} – {exc}", file=sys.stderr)
+        print(f"[collect] WARN  reddit rss fetch failed: {fetch_url} – {exc}", file=sys.stderr)
     return items, False
 
 
@@ -347,8 +459,11 @@ def collect_sources(rss_list_path: str | Path) -> list[SourceItem]:
     seen_urls: set[str] = set()
     seen_titles: set[str] = set()
     deduped: list[SourceItem] = []
+    html_cache: dict[str, str] = {}
+    html_budget = [_HTML_CANONICAL_MAX]
+
     for item in raw_items:
-        canon = _canonical_url(item.url)
+        canon = _dedupe_key(item, html_cache, html_budget)
         if canon in seen_urls:
             continue
         seen_urls.add(canon)
@@ -361,8 +476,9 @@ def collect_sources(rss_list_path: str | Path) -> list[SourceItem]:
         deduped.append(item)
 
     print(f"[collect] Collected {len(raw_items)} raw -> {len(deduped)} unique items", file=sys.stderr)
-    print(
-        f"[collect] INFO reddit rss blocked (403): {reddit_rss_blocked}/{reddit_rss_total} sources",
-        file=sys.stderr,
-    )
+    if reddit_rss_blocked > 0:
+        print(
+            f"[collect] INFO reddit rss blocked (403): {reddit_rss_blocked}/{reddit_rss_total} sources",
+            file=sys.stderr,
+        )
     return deduped

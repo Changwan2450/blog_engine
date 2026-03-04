@@ -28,8 +28,20 @@ class TopicSummary:
     key_points: list[str]
     source_urls: list[str]
     score: float
+    topic_en: str = ""
     topic_kr: str = ""
     topic_angle: str = ""
+    key_claims: list[dict] = field(default_factory=list)
+    source_domains: list[str] = field(default_factory=list)
+    topic_primary: str = "DevTools"
+    topic_secondary: str = ""
+
+    def __post_init__(self) -> None:
+        # Backward compatibility: topic aliases topic_en.
+        if not self.topic_en:
+            self.topic_en = self.topic
+        if not self.topic:
+            self.topic = self.topic_en
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +152,16 @@ _KR_TEMPLATES = {
 }
 _KR_DEFAULT = "{short}가 중요한 이유"
 
+_KR_TEMPLATES_ASCII = {
+    "Failure": "{short} 실패의 이유",
+    "Cost": "{short} 비용의 함정",
+    "Operations": "{short} 운영 이슈",
+    "SysDesign": "{short} 시스템 설계 포인트",
+    "Measurement": "{short} 측정 방법",
+    "Alternative": "{short} 대안 전략",
+}
+_KR_DEFAULT_ASCII = "{short} 핵심 포인트"
+
 
 def _heuristic_topic_en(raw: str) -> str:
     t = _DANGLING_RE.sub("", raw)
@@ -162,7 +184,11 @@ def _heuristic_topic_kr(en: str, lens_label: str = "") -> str:
         sp = cut.rfind(" ")
         return cut[:sp].rstrip(" ,;:-") if sp > max_len // 3 else cut.rstrip(" ,;:-")
 
-    tmpl = _KR_TEMPLATES.get(lens_label, _KR_DEFAULT)
+    is_ascii_heavy = bool(re.fullmatch(r"[A-Za-z0-9\s\-+_:'&,./()]+", en or ""))
+    if is_ascii_heavy:
+        tmpl = _KR_TEMPLATES_ASCII.get(lens_label, _KR_DEFAULT_ASCII)
+    else:
+        tmpl = _KR_TEMPLATES.get(lens_label, _KR_DEFAULT)
     # Try progressively shorter cuts until the result fits 45 chars
     for limit in (28, 22, 16):
         short = _word_cut(en, limit)
@@ -237,6 +263,131 @@ _BANNED_KEYPOINT_FRAGMENTS = (
     "출처:",
     "URL 컨텍스트:",
 )
+_ACTION_VERBS = {
+    "launch", "launched", "release", "released", "ship", "shipped",
+    "open-source", "opensourced", "announce", "announced", "raise",
+    "raised", "acquire", "acquired", "deploy", "deployed", "build", "built",
+}
+
+_PRIMARY_BUCKETS = [
+    ("AI Infra", {"inference", "serving", "gpu", "latency", "pipeline", "infrastructure"}),
+    ("Models", {"model", "llm", "gpt", "transformer", "reasoning"}),
+    ("DevTools", {"sdk", "ide", "cli", "tool", "agent", "coding"}),
+    ("Chips", {"chip", "npu", "gpu", "silicon", "semiconductor", "cuda"}),
+    ("Security", {"security", "vulnerability", "cve", "auth", "zero trust"}),
+    ("Web", {"browser", "web", "frontend", "javascript", "react"}),
+    ("Product", {"feature", "rollout", "ux", "subscription", "pricing"}),
+    ("OpenSource", {"github", "open source", "oss", "repository"}),
+    ("Data", {"dataset", "etl", "warehouse", "analytics", "db"}),
+    ("Business", {"revenue", "market", "funding", "enterprise", "acquisition"}),
+]
+
+_SECONDARY_ENTITIES = [
+    "OpenAI", "NVIDIA", "Apple", "AWS", "Amazon", "Google", "Microsoft",
+    "Kubernetes", "Rust", "Meta", "Anthropic", "GitHub", "Cloudflare", "Netflix",
+]
+
+
+def _sanitize_fragments(values: list[str]) -> list[str]:
+    clean: list[str] = []
+    for v in values:
+        if not v:
+            continue
+        if any(bad in v for bad in _BANNED_KEYPOINT_FRAGMENTS):
+            continue
+        clean.append(v.strip())
+    return clean
+
+
+def _extract_source_domains(urls: list[str]) -> list[str]:
+    domains: list[str] = []
+    seen: set[str] = set()
+    for u in urls:
+        try:
+            d = urlparse(u).netloc.lower().replace("www.", "")
+        except Exception:
+            d = ""
+        if not d or d in seen:
+            continue
+        seen.add(d)
+        domains.append(d)
+    return domains
+
+
+def _classify_topic(topic_en: str, item: SourceItem) -> tuple[str, str]:
+    text = f"{topic_en} {item.title} {item.url}".lower()
+    primary = "DevTools"
+    best = 0
+    for label, kws in _PRIMARY_BUCKETS:
+        score = sum(1 for kw in kws if kw in text)
+        if score > best:
+            best = score
+            primary = label
+
+    secondary = ""
+    for ent in _SECONDARY_ENTITIES:
+        if ent.lower() in text:
+            secondary = ent
+            break
+    return primary, secondary
+
+
+def _confidence_for_claim(claim: str, evidence: list[str]) -> str:
+    joined = " ".join([claim] + evidence)
+    has_quote_or_num = bool(_QUOTE_RE.search(joined) or re.search(r"\b\d[\d,]*(?:\.\d+)?\b", joined))
+    has_entity = bool(re.search(r"\b[A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){0,2}\b", joined))
+    has_action = any(v in joined.lower() for v in _ACTION_VERBS)
+
+    if has_quote_or_num and has_entity:
+        return "high"
+    if has_entity or has_action:
+        return "med"
+    return "low"
+
+
+def _build_key_claims(item: SourceItem) -> list[dict]:
+    title = item.title.strip()
+    claims: list[dict] = []
+
+    quoted: list[str] = []
+    for m in _QUOTE_RE.finditer(title):
+        q = m.group(1).strip()
+        if len(q) >= 10:
+            quoted.append('"' + q + '"')
+        if len(quoted) >= 2:
+            break
+
+    numeric_windows: list[str] = []
+    for m in re.finditer(r"\b\d[\d,]*(?:\.\d+)?\s*(?:%|x|X|\+|billion|million|thousand|B\b|M\b|K\b)?", title):
+        st = max(0, m.start() - 28)
+        ed = min(len(title), m.end() + 36)
+        win = re.sub(r"\s+", " ", title[st:ed]).strip(" ,;:-")
+        if len(win) >= 14:
+            numeric_windows.append(win)
+        if len(numeric_windows) >= 2:
+            break
+
+    entities = re.findall(r"\b[A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){0,2}\b", title)
+    entities = [e for e in entities if e not in _CAP_SKIP]
+
+    if quoted or numeric_windows or entities:
+        ev = _sanitize_fragments((quoted + numeric_windows + entities)[:4])
+        claim = clean_topic(title)
+        claims.append({
+            "claim": claim,
+            "evidence": ev[:3] or [claim[:90]],
+            "confidence": _confidence_for_claim(claim, ev[:3]),
+        })
+
+    if not claims:
+        fallback = clean_topic(title) or title[:90]
+        claims.append({
+            "claim": fallback,
+            "evidence": [fallback[:90]],
+            "confidence": "low",
+        })
+
+    return claims[:3]
 
 
 def _extract_key_points_from_item(item: SourceItem) -> list[str]:
@@ -293,6 +444,17 @@ def _extract_key_points_from_item(item: SourceItem) -> list[str]:
         seen.add(norm)
         unique_points.append(p)
     return unique_points[:5]
+
+
+def _flatten_points_from_claims(key_claims: list[dict]) -> list[str]:
+    points: list[str] = []
+    for kc in key_claims:
+        claim = str(kc.get("claim", "")).strip()
+        ev = [str(x).strip() for x in kc.get("evidence", []) if str(x).strip()]
+        if claim:
+            points.append(claim)
+        points.extend(ev[:2])
+    return _sanitize_fragments(points)[:5]
 
 
 # ---------------------------------------------------------------------------
@@ -368,16 +530,29 @@ def summarize_items(items: list[SourceItem], top_n: int = 10) -> List[TopicSumma
     for item in ranked:
         topic_raw = clean_topic(item.title)
         rewritten = rewrite_topic(topic_raw)
-        topic = rewritten["topic_en"]
-        key_points = _extract_key_points_from_item(item)
+        topic_en = rewritten["topic_en"]
+        key_claims = _build_key_claims(item)
+        key_points = _flatten_points_from_claims(key_claims)
+        if not key_points:
+            key_points = _extract_key_points_from_item(item)
+            key_points = _sanitize_fragments(key_points)
+
+        source_urls = [item.url]
+        source_domains = _extract_source_domains(source_urls)
+        topic_primary, topic_secondary = _classify_topic(topic_en, item)
 
         summaries.append(TopicSummary(
-            topic=topic,
+            topic=topic_en,
+            topic_en=topic_en,
             key_points=key_points,
-            source_urls=[item.url],
+            key_claims=key_claims,
+            source_urls=source_urls,
+            source_domains=source_domains,
             score=item.score,
             topic_kr=rewritten["topic_kr"],
             topic_angle=rewritten["topic_angle"],
+            topic_primary=topic_primary,
+            topic_secondary=topic_secondary,
         ))
 
     return summaries
