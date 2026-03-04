@@ -79,57 +79,58 @@ def _normalise_title(text: str) -> str:
 def _read_url(url: str) -> bytes:
     """Fetch URL content with robust retry logic.
 
-    Retry strategy (max 1 retry per URL):
-      - 301/302/307/308: follow Location header once
-      - 406: retry with relaxed Accept header
-      - 429/5xx: retry after 2-second sleep
+    - 3xx: follows Location header up to 3 hops
+    - 406: retry once with relaxed Accept header
+    - 429/5xx: retry once after 2-second sleep
     """
     headers = dict(_DEFAULT_HEADERS)
-    req = Request(url, headers=headers)
+
+    def _fetch(u: str, hdrs: dict) -> bytes:
+        with urlopen(Request(u, headers=hdrs), timeout=_TIMEOUT) as resp:
+            return resp.read()
 
     try:
-        with urlopen(req, timeout=_TIMEOUT) as resp:
-            return resp.read()
+        return _fetch(url, headers)
     except HTTPError as exc:
-        # Redirect: follow Location header once (resolve relative URLs)
+        # Redirect: follow Location up to 3 hops
         if exc.code in _REDIRECT_CODES:
-            location = exc.headers.get("Location", "")
-            if location:
-                resolved = urljoin(url, location)
-                print(f"[collect] WARN  {exc.code} redirect {url} → {resolved}",
+            current = url
+            hop_exc = exc
+            for _hop in range(3):
+                loc = hop_exc.headers.get("Location", "")
+                if not loc:
+                    break
+                target = urljoin(current, loc)
+                print("[collect] WARN  %d redirect %s → %s" % (hop_exc.code, current, target),
                       file=sys.stderr)
-                req2 = Request(resolved, headers=headers)
+                current = target
                 try:
-                    with urlopen(req2, timeout=_TIMEOUT) as resp:
-                        return resp.read()
-                except (HTTPError, URLError, OSError) as exc2:
-                    raise HTTPError(
-                        url, exc.code,
-                        f"Redirect to {resolved} also failed: {exc2}",
-                        exc.headers, None,
-                    ) from exc2
-            raise
+                    return _fetch(current, headers)
+                except HTTPError as next_exc:
+                    if next_exc.code in _REDIRECT_CODES:
+                        hop_exc = next_exc
+                        continue
+                    raise next_exc
+                except (URLError, OSError):
+                    raise
+            raise hop_exc
 
-        # 406 Not Acceptable: retry with relaxed Accept header
+        # 406 Not Acceptable: retry with relaxed Accept
         if exc.code == 406:
-            headers_relaxed = dict(headers)
-            headers_relaxed["Accept"] = _RELAXED_ACCEPT
-            req2 = Request(url, headers=headers_relaxed)
+            relaxed = dict(headers)
+            relaxed["Accept"] = _RELAXED_ACCEPT
             try:
-                with urlopen(req2, timeout=_TIMEOUT) as resp:
-                    return resp.read()
+                return _fetch(url, relaxed)
             except (HTTPError, URLError, OSError):
                 raise exc
 
         # 429 / 5xx: retry once after sleep
         if exc.code == 429 or exc.code >= 500:
-            print(f"[collect] WARN  {exc.code} from {url}, retrying in {_RETRY_SLEEP}s …",
+            print("[collect] WARN  %d from %s, retrying in %ds …" % (exc.code, url, _RETRY_SLEEP),
                   file=sys.stderr)
             time.sleep(_RETRY_SLEEP)
-            req2 = Request(url, headers=headers)
             try:
-                with urlopen(req2, timeout=_TIMEOUT) as resp:
-                    return resp.read()
+                return _fetch(url, headers)
             except (HTTPError, URLError, OSError):
                 raise exc
 

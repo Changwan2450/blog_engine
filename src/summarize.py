@@ -11,10 +11,13 @@ clean_topic() deterministically cleans raw feed titles:
 """
 from __future__ import annotations
 
+import json
+import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 from urllib.parse import urlparse, urlunparse
+from urllib.request import Request, urlopen
 
 from collect import SourceItem
 
@@ -25,6 +28,8 @@ class TopicSummary:
     key_points: list[str]
     source_urls: list[str]
     score: float
+    topic_kr: str = ""
+    topic_angle: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +121,171 @@ def clean_topic(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Topic rewriting helpers
+# ---------------------------------------------------------------------------
+
+_DANGLING_RE = re.compile(
+    r"\s*[—\-–]\s*(and|or|but|with|for|to|the|a|an)\s*$",
+    re.IGNORECASE,
+)
+_TRAILING_JUNK_RE = re.compile(r"[\s:,;.!?—\-–]+$")
+
+_KR_TEMPLATES = {
+    "Failure":     "{short}가 실패하는 이유",
+    "Cost":        "{short}의 숨은 비용",
+    "Operations":  "{short}를 운영에 올리면 터지는 것들",
+    "SysDesign":   "{short} 시스템 설계 구조",
+    "Measurement": "{short}를 측정하는 방법",
+    "Alternative": "{short} 없이도 되는 방법",
+}
+_KR_DEFAULT = "{short}가 중요한 이유"
+
+
+def _heuristic_topic_en(raw: str) -> str:
+    t = _DANGLING_RE.sub("", raw)
+    t = re.sub(r"\s+:\s*$", "", t)
+    t = re.sub(r",\s*and\s*$", "", t, flags=re.IGNORECASE)
+    t = _TRAILING_JUNK_RE.sub("", t).strip()
+    if len(t) > 80:
+        cut = t[:80]
+        sp = cut.rfind(" ")
+        t = cut[:sp].rstrip(" ,;:-") if sp > 40 else cut
+    return t or raw.strip()[:80]
+
+
+def _heuristic_topic_kr(en: str, lens_label: str = "") -> str:
+    def _word_cut(s: str, max_len: int) -> str:
+        """Cut s to max_len chars at a word boundary."""
+        if len(s) <= max_len:
+            return s
+        cut = s[:max_len]
+        sp = cut.rfind(" ")
+        return cut[:sp].rstrip(" ,;:-") if sp > max_len // 3 else cut.rstrip(" ,;:-")
+
+    tmpl = _KR_TEMPLATES.get(lens_label, _KR_DEFAULT)
+    # Try progressively shorter cuts until the result fits 45 chars
+    for limit in (28, 22, 16):
+        short = _word_cut(en, limit)
+        candidate = tmpl.format(short=short)
+        if len(candidate) <= 45:
+            return candidate
+    return _word_cut(en, 42)
+
+
+def rewrite_topic(raw: str, lens_label: str = "") -> dict:
+    """Return {topic_en, topic_kr, topic_angle}. LLM if key present, else heuristic."""
+    en = _heuristic_topic_en(raw)
+    kr = _heuristic_topic_kr(en, lens_label)
+    angle_prefix = (lens_label + " 관점에서 ") if lens_label else ""
+    angle = angle_prefix + en + "의 실질적 영향"
+
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return {"topic_en": en, "topic_kr": kr, "topic_angle": angle}
+
+    user_msg = (
+        'Raw headline: "' + raw + '"\n'
+        "Lens: " + (lens_label or "general") + "\n\n"
+        "Return ONLY valid JSON with keys:\n"
+        "  topic_en  - clean English headline, <=80 chars, no trailing junk\n"
+        "  topic_kr  - Korean headline, <=45 chars\n"
+        "  topic_angle - 1 sentence angle aligned with the lens\n"
+        "No markdown, no extra keys."
+    )
+    try:
+        payload = json.dumps({
+            "model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+            "messages": [{"role": "user", "content": user_msg}],
+            "temperature": 0.3,
+            "max_tokens": 200,
+        }).encode()
+        req = Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=payload,
+            headers={
+                "Authorization": "Bearer " + api_key,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode())
+        parsed = json.loads(data["choices"][0]["message"]["content"])
+        return {
+            "topic_en": str(parsed.get("topic_en", en))[:80],
+            "topic_kr": str(parsed.get("topic_kr", kr))[:45],
+            "topic_angle": str(parsed.get("topic_angle", angle)),
+        }
+    except Exception:
+        return {"topic_en": en, "topic_kr": kr, "topic_angle": angle}
+
+
+# ---------------------------------------------------------------------------
+# Source-grounded key_points extraction
+# ---------------------------------------------------------------------------
+
+_CAP_SKIP = {
+    "The", "This", "That", "With", "From", "Into", "Their", "They",
+    "What", "When", "Where", "Which", "How", "Why", "Who", "Will",
+    "Has", "Have", "Been", "Are", "Was", "Were", "And", "But", "For",
+    "Its", "New", "Now", "Just", "Also", "More", "Most", "Some",
+}
+
+
+def _extract_key_points_from_item(item: SourceItem) -> list[str]:
+    """Build source-grounded key_points from item.title and item.url."""
+    points: list[str] = []
+    title = item.title.strip()
+
+    # Numbers + surrounding context from title
+    for m in re.finditer(
+        r"\b\d[\d,]*(?:\.\d+)?\s*(?:%|x|X|\+|billion|million|thousand|B\b|M\b|K\b)?",
+        title,
+    ):
+        start = max(0, m.start() - 30)
+        end = min(len(title), m.end() + 40)
+        snippet = re.sub(r"\s+", " ", title[start:end]).strip()
+        if len(snippet) > 12:
+            points.append(snippet)
+        if len(points) >= 2:
+            break
+
+    # Capitalized product / company names from title
+    cap_phrases = re.findall(r"\b[A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)*\b", title)
+    caps = [p for p in cap_phrases if p not in _CAP_SKIP and len(p) > 3]
+    if caps:
+        points.append("관련 기술/기업: " + ", ".join(caps[:4]))
+
+    # Domain as publication signal
+    try:
+        domain = urlparse(item.url).netloc.replace("www.", "")
+        if domain:
+            points.append("출처: " + domain)
+    except Exception:
+        pass
+
+    # URL path keywords
+    try:
+        path = urlparse(item.url).path
+        parts = [
+            p.replace("-", " ").replace("_", " ")
+            for p in path.split("/")
+            if len(p) > 5 and not p.isdigit() and p.replace("-", "").replace("_", "").isalpha()
+        ]
+        if parts:
+            kw = " / ".join(parts[:3])
+            points.append("URL 컨텍스트: " + kw[:60])
+    except Exception:
+        pass
+
+    # Fallback: title itself
+    if not points:
+        points.append(title[:100])
+
+    return points[:5]
+
+
+# ---------------------------------------------------------------------------
 # Dedup helpers
 # ---------------------------------------------------------------------------
 
@@ -186,26 +356,18 @@ def summarize_items(items: list[SourceItem], top_n: int = 10) -> List[TopicSumma
     # --- Build summaries ---
     summaries: list[TopicSummary] = []
     for item in ranked:
-        # Clean the raw title into a usable topic
-        topic = clean_topic(item.title)
-
-        # Use the placeholder summariser on a synthetic paragraph.
-        raw_text = (
-            f"{topic}. "
-            "Recent discussions show strong momentum in AI automation. "
-            "Practical use-cases are shifting from demos to workflow tools. "
-            "Model quality and orchestration are both critical for adoption. "
-            "Teams get better outcomes with narrow, repeatable pilot scopes. "
-            "Cost efficiency remains a major driver for enterprise interest."
-        )
-        summary_str = summarize_text(raw_text)
-        key_points = [s.strip() for s in summary_str.split(". ") if s.strip()]
+        topic_raw = clean_topic(item.title)
+        rewritten = rewrite_topic(topic_raw)
+        topic = rewritten["topic_en"]
+        key_points = _extract_key_points_from_item(item)
 
         summaries.append(TopicSummary(
             topic=topic,
             key_points=key_points,
             source_urls=[item.url],
             score=item.score,
+            topic_kr=rewritten["topic_kr"],
+            topic_angle=rewritten["topic_angle"],
         ))
 
     return summaries

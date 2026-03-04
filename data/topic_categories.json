@@ -20,7 +20,8 @@
     "openai",
     "workflows",
     "protocol",
-    "model"
+    "model",
+    "engineering"
   ],
   "tools": [
     "mcp",
@@ -45,7 +46,10 @@
     "building",
     "server",
     "introducing",
-    "claude"
+    "claude",
+    "anthropic",
+    "web",
+    "google"
   ],
   "productivity": [
     "automation",
@@ -69,7 +73,9 @@
     "enterprise",
     "com",
     "protocol",
-    "nvidia"
+    "nvidia",
+    "developer",
+    "tradingview"
   ],
   "models": [
     "models",
@@ -116,7 +122,8 @@
     "amazon",
     "protocol",
     "data",
-    "cloudflare"
+    "cloudflare",
+    "agent"
   ],
   "systems": [
     "orchestration",
@@ -139,7 +146,9 @@
     "openai",
     "launches",
     "building",
-    "automation"
+    "automation",
+    "services",
+    "nature"
   ],
   "cost": [
     "code",
@@ -166,7 +175,10 @@
     "context",
     "language",
     "model",
-    "api"
+    "api",
+    "llm",
+    "inference",
+    "coding"
   ],
   "failures": [
     "risk",
@@ -189,7 +201,8 @@
     "tool",
     "workflows",
     "agentic",
-    "mistakes"
+    "mistakes",
+    "failure"
   ],
   "measurement": [
     "performance",
@@ -236,6 +249,8 @@
     "mcp",
     "guide",
     "code",
-    "tools"
+    "tools",
+    "coding",
+    "model"
   ]
 }

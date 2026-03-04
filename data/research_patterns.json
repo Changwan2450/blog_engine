@@ -249,7 +249,11 @@
     "built",
     "Microsoft",
     "microsoft",
-    "Systems"
+    "Systems",
+    "Cloud",
+    "finance",
+    "VentureBeat",
+    "local llm"
   ],
   "section_patterns": [
     "practical_how_to",
