@@ -19,7 +19,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
@@ -201,7 +201,7 @@ def _fetch_reddit_json(url: str) -> List[SourceItem]:
 # Reddit RSS/Atom (avoids 403 that the JSON API returns to bots)
 # ---------------------------------------------------------------------------
 
-def _fetch_reddit_rss(url: str) -> List[SourceItem]:
+def _fetch_reddit_rss(url: str) -> Tuple[List[SourceItem], bool]:
     """Fetch a Reddit subreddit feed via the .rss (Atom) endpoint."""
     items: List[SourceItem] = []
     try:
@@ -224,9 +224,14 @@ def _fetch_reddit_rss(url: str) -> List[SourceItem]:
                 language="en",
                 score=60.0,
             ))
+    except HTTPError as exc:
+        if exc.code == 403:
+            # Reddit often blocks bot-like RSS requests. Skip silently.
+            return [], True
+        print(f"[collect] WARN  reddit rss fetch failed: {url} – {exc}", file=sys.stderr)
     except (URLError, ET.ParseError, OSError) as exc:
         print(f"[collect] WARN  reddit rss fetch failed: {url} – {exc}", file=sys.stderr)
-    return items
+    return items, False
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +307,8 @@ def _dispatch_url(url: str) -> List[SourceItem]:
     if _RE_REDDIT.search(url):
         # Use RSS endpoint to avoid 403 that the JSON API returns to bots
         if ".rss" in url:
-            return _fetch_reddit_rss(url)
+            items, _blocked = _fetch_reddit_rss(url)
+            return items
         return _fetch_reddit_json(url)
     return _fetch_external_rss(url)
 
@@ -325,7 +331,16 @@ def collect_sources(rss_list_path: str | Path) -> list[SourceItem]:
         targets = list(_FALLBACK_URLS)
 
     raw_items: list[SourceItem] = []
+    reddit_rss_total = 0
+    reddit_rss_blocked = 0
     for url in targets:
+        if _RE_REDDIT.search(url) and ".rss" in url:
+            reddit_rss_total += 1
+            items, blocked = _fetch_reddit_rss(url)
+            raw_items.extend(items)
+            if blocked:
+                reddit_rss_blocked += 1
+            continue
         raw_items.extend(_dispatch_url(url))
 
     # Deduplicate: canonical URL first, then normalised title
@@ -346,4 +361,8 @@ def collect_sources(rss_list_path: str | Path) -> list[SourceItem]:
         deduped.append(item)
 
     print(f"[collect] Collected {len(raw_items)} raw -> {len(deduped)} unique items", file=sys.stderr)
+    print(
+        f"[collect] INFO reddit rss blocked (403): {reddit_rss_blocked}/{reddit_rss_total} sources",
+        file=sys.stderr,
+    )
     return deduped

@@ -9,6 +9,7 @@ data/term_history.jsonl
 data/trend_terms.json
 data/topic_pool.txt
 data/_sources_all.txt
+data/topic_memory.json
 
 # Python
 __pycache__/

@@ -269,52 +269,108 @@ _NUM_CTX_RE = re.compile(
     re.IGNORECASE,
 )
 _QUOTE_CTX_RE = re.compile(r'"([^"]{10,100})"')
+_COMPANY_CTX_RE = re.compile(
+    r"\b(?:[A-Z][A-Za-z0-9&\-]{1,}(?:\s+[A-Z][A-Za-z0-9&\-]{1,}){0,3})\b"
+)
+_GENERIC_EVIDENCE_RE = re.compile(
+    r"(important|trend|update|overview|introduction|요약|정리|소개|동향)",
+    re.IGNORECASE,
+)
+_METADATA_FRAGMENT_RE = re.compile(r"(관련\s*기술/기업:|출처:|URL\s*컨텍스트:)", re.IGNORECASE)
+_QUOTE_TRANSLATION = str.maketrans({
+    "“": '"',
+    "”": '"',
+    "‘": "'",
+    "’": "'",
+})
+
+
+def _normalise_quotes(text: str) -> str:
+    return text.translate(_QUOTE_TRANSLATION)
 
 
 def _extract_evidence(summary_text: str) -> list[str]:
-    """Extract 2-3 concrete facts from summary text. Returns [] if nothing found."""
-    facts: list[str] = []
+    """Extract high-signal evidence (quotes, numeric claims, company mentions)."""
+    text = _normalise_quotes(summary_text or "")
+    if not text.strip():
+        return []
 
-    for m in _QUOTE_CTX_RE.finditer(summary_text):
-        facts.append('"' + m.group(1) + '"')
-        if len(facts) >= 2:
-            break
+    candidates: list[str] = []
 
-    for m in _NUM_CTX_RE.finditer(summary_text):
+    for m in _QUOTE_CTX_RE.finditer(text):
+        quote = '"' + m.group(1).strip() + '"'
+        if len(quote) >= 12:
+            candidates.append(quote)
+
+    for m in _NUM_CTX_RE.finditer(text):
         start = max(0, m.start() - 35)
-        end = min(len(summary_text), m.end() + 35)
-        snippet = re.sub(r"\s+", " ", summary_text[start:end]).strip()
-        if len(snippet) > 18:
-            facts.append(snippet)
-        if len(facts) >= 3:
-            break
+        end = min(len(text), m.end() + 45)
+        snippet = re.sub(r"\s+", " ", text[start:end]).strip(" -,:;.")
+        if len(snippet) >= 18:
+            candidates.append(snippet)
 
-    if not facts:
-        sentences = re.split(r"(?<=[.!?])\s+", summary_text.strip())
-        for s in sentences:
-            s = s.strip()
-            if len(s) > 40:
-                facts.append(s)
-            if len(facts) >= 2:
-                break
+    for m in _COMPANY_CTX_RE.finditer(text):
+        phrase = m.group(0).strip()
+        if len(phrase) >= 4 and phrase.lower() not in {"the", "this", "that"}:
+            candidates.append(phrase + " announced a concrete change")
 
-    return facts[:3]
+    if not candidates:
+        return []
+
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for c in candidates:
+        if _METADATA_FRAGMENT_RE.search(c):
+            continue
+        if _GENERIC_EVIDENCE_RE.search(c):
+            continue
+
+        norm = " ".join(c.lower().split())
+        if norm in seen:
+            continue
+        seen.add(norm)
+
+        score = 0
+        if _QUOTE_CTX_RE.search(c):
+            score += 4
+        if _NUM_CTX_RE.search(c):
+            score += 4
+        if _COMPANY_CTX_RE.search(c):
+            score += 2
+        if len(c) < 14:
+            score -= 1
+
+        if score > 0:
+            scored.append((score, c[:140]))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [c for _, c in scored[:3]]
 
 
 def _cap_topic_repetitions(text: str, topic: str, topic_kr: str, limit: int = 2) -> str:
-    """Replace occurrences of raw topic beyond `limit` with topic_kr."""
-    if not topic:
-        return text
-    pattern = re.compile(re.escape(topic), re.IGNORECASE)
-    count = [0]
+    """Cap both English/Korean topic mentions beyond `limit` with quote normalization."""
 
-    def _repl(m: re.Match) -> str:
-        count[0] += 1
-        if count[0] <= limit:
-            return m.group(0)
-        return topic_kr if topic_kr else m.group(0)
+    def _cap_phrase(s: str, phrase: str, replacement: str, ignore_case: bool) -> str:
+        if not phrase or not replacement:
+            return s
+        flags = re.IGNORECASE if ignore_case else 0
+        pattern = re.compile(re.escape(_normalise_quotes(phrase)), flags)
+        count = [0]
 
-    return pattern.sub(_repl, text)
+        def _repl(m: re.Match) -> str:
+            count[0] += 1
+            if count[0] <= limit:
+                return m.group(0)
+            return replacement
+
+        return pattern.sub(_repl, s)
+
+    capped = _normalise_quotes(text)
+    if topic:
+        capped = _cap_phrase(capped, topic, topic_kr or "이 주제", ignore_case=True)
+    if topic_kr:
+        capped = _cap_phrase(capped, topic_kr, "이 주제", ignore_case=False)
+    return capped
 
 
 # ---------------------------------------------------------------------------
@@ -689,12 +745,11 @@ def _build_article(
         hook_text, "---",
         thesis, why, checklist, failures, closing,
     ])
-    blog_section = _cap_topic_repetitions(blog_section, topic, t_kr, limit=2)
 
     x_thread = _build_x_thread_template(t_kr, lens_id, hook, domain_angle)
     x_section = "## X THREAD (EN copy/paste)\n\n" + x_thread
-
-    return blog_section + "\n\n---\n\n" + x_section
+    full_text = blog_section + "\n\n---\n\n" + x_section
+    return _cap_topic_repetitions(full_text, topic, t_kr, limit=2)
 
 
 # ---------------------------------------------------------------------------

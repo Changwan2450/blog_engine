@@ -43,6 +43,12 @@ from write import generate_drafts, draft_passes_quality
 from research import extract_patterns, load_patterns
 from render import make_timestamp, render_markdown, save_markdown
 from learn import log_run
+from topic_memory import (
+    append_topic_memory,
+    is_topic_in_memory,
+    load_topic_memory,
+    save_topic_memory,
+)
 
 
 def _load_select_module():
@@ -294,8 +300,27 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
     if not summaries:
         raise RuntimeError("No summaries generated. Check source inputs.")
 
+    # Remove topics that are too similar to recent runs (rolling 14 days).
+    topic_memory_path = data_dir / "topic_memory.json"
+    topic_memory = load_topic_memory(topic_memory_path, rolling_days=14)
+    fresh_summaries = [
+        s for s in summaries
+        if not is_topic_in_memory(
+            getattr(s, "topic", "") or "",
+            getattr(s, "topic_kr", "") or "",
+            topic_memory,
+            threshold=0.7,
+        )
+    ]
+    if fresh_summaries:
+        summaries_for_pick = fresh_summaries
+    else:
+        print("[topic] WARN  all candidates overlap recent topics; allowing best available",
+              file=sys.stderr)
+        summaries_for_pick = summaries
+
     # pick summary using topic hint (if any), otherwise the top summary
-    target_summary = _pick_summary_by_topic(summaries, topic_hint)
+    target_summary = _pick_summary_by_topic(summaries_for_pick, topic_hint)
 
     # --- 5. Write (5 drafts) with topic_hint + research ---
     print("[pipeline] 5/9  Generating 5 drafts …", file=sys.stderr)
@@ -350,6 +375,13 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
             "hook_cat": getattr(selected, "hook_cat", ""),
         },
     )
+
+    topic_memory = append_topic_memory(
+        topic_memory,
+        getattr(target_summary, "topic", "") or "",
+        getattr(target_summary, "topic_kr", "") or "",
+    )
+    save_topic_memory(topic_memory_path, topic_memory, rolling_days=14)
 
     return final_path, candidate_paths
 

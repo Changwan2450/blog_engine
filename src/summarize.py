@@ -231,11 +231,26 @@ _CAP_SKIP = {
     "Its", "New", "Now", "Just", "Also", "More", "Most", "Some",
 }
 
+_QUOTE_RE = re.compile(r"[\"'“”‘’]([^\"'“”‘’]{8,120})[\"'“”‘’]")
+_BANNED_KEYPOINT_FRAGMENTS = (
+    "관련 기술/기업:",
+    "출처:",
+    "URL 컨텍스트:",
+)
+
 
 def _extract_key_points_from_item(item: SourceItem) -> list[str]:
     """Build source-grounded key_points from item.title and item.url."""
     points: list[str] = []
     title = item.title.strip()
+
+    # Direct quoted claims from title
+    for m in _QUOTE_RE.finditer(title):
+        quote = m.group(1).strip()
+        if len(quote) >= 10:
+            points.append('"' + quote + '"')
+        if len(points) >= 2:
+            break
 
     # Numbers + surrounding context from title
     for m in re.finditer(
@@ -254,35 +269,30 @@ def _extract_key_points_from_item(item: SourceItem) -> list[str]:
     cap_phrases = re.findall(r"\b[A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)*\b", title)
     caps = [p for p in cap_phrases if p not in _CAP_SKIP and len(p) > 3]
     if caps:
-        points.append("관련 기술/기업: " + ", ".join(caps[:4]))
-
-    # Domain as publication signal
-    try:
-        domain = urlparse(item.url).netloc.replace("www.", "")
-        if domain:
-            points.append("출처: " + domain)
-    except Exception:
-        pass
-
-    # URL path keywords
-    try:
-        path = urlparse(item.url).path
-        parts = [
-            p.replace("-", " ").replace("_", " ")
-            for p in path.split("/")
-            if len(p) > 5 and not p.isdigit() and p.replace("-", "").replace("_", "").isalpha()
-        ]
-        if parts:
-            kw = " / ".join(parts[:3])
-            points.append("URL 컨텍스트: " + kw[:60])
-    except Exception:
-        pass
+        points.append(", ".join(caps[:4]) + " mentioned in the report")
 
     # Fallback: title itself
     if not points:
         points.append(title[:100])
 
-    return points[:5]
+    # Final guard: remove metadata-labeled fragments if present.
+    filtered_points = [
+        p for p in points
+        if p and not any(bad in p for bad in _BANNED_KEYPOINT_FRAGMENTS)
+    ]
+    if not filtered_points:
+        filtered_points = [title[:100]] if title else []
+
+    # Deduplicate while preserving order.
+    unique_points: list[str] = []
+    seen: set[str] = set()
+    for p in filtered_points:
+        norm = " ".join(p.lower().split())
+        if norm in seen:
+            continue
+        seen.add(norm)
+        unique_points.append(p)
+    return unique_points[:5]
 
 
 # ---------------------------------------------------------------------------
