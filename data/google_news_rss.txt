@@ -1,0 +1,20 @@
+# --- AI Agents / Automation ---
+https://news.google.com/rss/search?q=AI+agents&hl=en-US&gl=US&ceid=US:en
+https://news.google.com/rss/search?q=AI+automation&hl=en-US&gl=US&ceid=US:en
+https://news.google.com/rss/search?q=multi+agent+system&hl=en-US&gl=US&ceid=US:en
+https://news.google.com/rss/search?q=AI+orchestration&hl=en-US&gl=US&ceid=US:en
+
+# --- AI Coding / Vibe Coding ---
+https://news.google.com/rss/search?q=AI+coding+assistant&hl=en-US&gl=US&ceid=US:en
+https://news.google.com/rss/search?q=Claude+Code&hl=en-US&gl=US&ceid=US:en
+https://news.google.com/rss/search?q=OpenAI+Codex&hl=en-US&gl=US&ceid=US:en
+
+# --- Context / MCP / Tools ---
+https://news.google.com/rss/search?q=Model+Context+Protocol&hl=en-US&gl=US&ceid=US:en
+https://news.google.com/rss/search?q=context+engineering+AI&hl=en-US&gl=US&ceid=US:en
+https://news.google.com/rss/search?q=LLM+tool+calling&hl=en-US&gl=US&ceid=US:en
+
+# --- Local AI / Hardware ---
+https://news.google.com/rss/search?q=Apple+Neural+Engine&hl=en-US&gl=US&ceid=US:en
+https://news.google.com/rss/search?q=on-device+AI&hl=en-US&gl=US&ceid=US:en
+https://news.google.com/rss/search?q=local+LLM&hl=en-US&gl=US&ceid=US:en

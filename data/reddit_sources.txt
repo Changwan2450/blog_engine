@@ -1,0 +1,20 @@
+# LLM / Local AI
+https://www.reddit.com/r/LocalLLaMA/top.json?t=day&limit=25
+
+# AI research
+https://www.reddit.com/r/MachineLearning/top.json?t=day&limit=25
+
+# AI discussion
+https://www.reddit.com/r/artificial/top.json?t=day&limit=25
+
+# Future AI discussion
+https://www.reddit.com/r/singularity/top.json?t=day&limit=25
+
+# Programming trends
+https://www.reddit.com/r/programming/top.json?t=day&limit=25
+
+# DevOps automation
+https://www.reddit.com/r/devops/top.json?t=week&limit=25
+
+# Indie / startup projects
+https://www.reddit.com/r/SideProject/top.json?t=week&limit=25

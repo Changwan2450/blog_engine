@@ -1,0 +1,19 @@
+# Generated output
+out/
+
+# Runtime data (local learning state — not shared)
+data/metrics.csv
+data/runs.jsonl
+data/bandit_state.json
+data/term_history.jsonl
+data/trend_terms.json
+data/topic_pool.txt
+data/_sources_all.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
