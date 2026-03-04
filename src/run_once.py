@@ -49,6 +49,7 @@ from research import extract_patterns, load_patterns
 from render import make_timestamp, render_markdown, save_markdown
 from learn import log_run
 from critic import critique_draft
+from hook import generate_hook
 from topic_memory import (
     append_topic_memory,
     is_topic_in_memory,
@@ -344,11 +345,19 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
 
     # pick summary using topic hint (if any), otherwise the top summary
     target_summary = _pick_summary_by_topic(summaries_for_pick, topic_hint)
+    subject_for_hook = (
+        (getattr(target_summary, "topic_kr", "") or "").strip()
+        or (getattr(target_summary, "topic_secondary", "") or "").strip()
+        or (getattr(target_summary, "topic_en", "") or "").strip()
+        or (getattr(target_summary, "topic_primary", "") or "").strip()
+    )
+    hook_line = generate_hook(subject_for_hook)
 
     # --- 5. Write (5 drafts) with topic_hint + research ---
     print("[pipeline] 5/9  Generating 5 drafts …", file=sys.stderr)
     drafts = generate_drafts(target_summary, count=5, topic_hint=topic_hint,
-                             research_patterns=research_patterns)
+                             research_patterns=research_patterns,
+                             hook_line=hook_line)
 
     # --- 5.5 Critic + one rewrite pass ---
     print("[pipeline] 5.5/9  Critic + rewrite …", file=sys.stderr)
