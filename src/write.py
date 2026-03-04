@@ -46,6 +46,7 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from env_loader import get_model
 from summarize import TopicSummary, _heuristic_topic_kr
 
 
@@ -201,18 +202,22 @@ def draft_passes_quality(draft: Draft) -> bool:
 # ---------------------------------------------------------------------------
 
 _OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
-_OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 _OPENAI_TIMEOUT = 90  # seconds (longer for full blog+thread)
 
 
-def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 3000) -> str:
+def _call_llm(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 3000,
+    stage: str = "write",
+) -> str:
     """Call OpenAI-compatible chat completion API via urllib."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
 
     payload = json.dumps({
-        "model": _OPENAI_MODEL,
+        "model": get_model(stage),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_prompt},
@@ -249,11 +254,51 @@ def generate_text(prompt: str) -> str:
                 "항상 통찰력 있는 분석 에세이를 작성하며 요약이나 뉴스 전달은 하지 않습니다."
             ),
             user_prompt=prompt,
+            stage="write",
         )
     except (URLError, KeyError, json.JSONDecodeError, RuntimeError, OSError) as exc:
         print(f"[write] WARN  LLM call failed ({exc}); using template fallback",
               file=sys.stderr)
         return prompt
+
+
+def rewrite_with_feedback(
+    draft_body: str,
+    topic_kr: str,
+    lens_label: str,
+    feedback: dict,
+) -> str:
+    """Rewrite draft body with critic feedback using writer model."""
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return draft_body
+
+    instr = [str(x).strip() for x in feedback.get("rewrite_instructions", []) if str(x).strip()]
+    boring = [str(x).strip() for x in feedback.get("whats_boring", []) if str(x).strip()]
+    strong = [str(x).strip() for x in feedback.get("whats_strong", []) if str(x).strip()]
+
+    prompt = (
+        "다음 초안을 더 날카롭고 통찰 중심으로 고쳐 써라.\n"
+        "주제: " + topic_kr + "\n"
+        "렌즈: " + lens_label + "\n\n"
+        "유지할 강점:\n- " + ("\n- ".join(strong[:3]) if strong else "핵심 논지의 선명함") + "\n\n"
+        "줄일 부분:\n- " + ("\n- ".join(boring[:3]) if boring else "반복적 문장") + "\n\n"
+        "개선 지시:\n- " + ("\n- ".join(instr[:7]) if instr else "문장 밀도를 높이고 중복을 제거") + "\n\n"
+        "제약:\n"
+        "- 섹션 구조(TL;DR, Why it matters, Article, 근거/출처)는 유지\n"
+        "- 메타데이터 라벨(출처:, URL 컨텍스트:, 관련 기술/기업:) 금지\n"
+        "- 사실 기반 톤 유지\n\n"
+        "초안:\n" + draft_body
+    )
+    try:
+        return _call_llm(
+            system_prompt="당신은 날카로운 기술 칼럼 편집자다. 군더더기 없이 핵심을 남긴다.",
+            user_prompt=prompt,
+            max_tokens=2800,
+            stage="write",
+        )
+    except (URLError, KeyError, json.JSONDecodeError, RuntimeError, OSError):
+        return draft_body
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +519,7 @@ def _build_thesis(hook: str, lens_id: str, topic: str, domain_angle: str) -> str
 
 def _build_why_it_matters(topic: str, facts: list[str], domain_angle: str) -> str:
     lines = ["## 변화의 핵심", "",
-             "'" + topic + "'을 둘러싼 환경은 최근 6개월간 구조적으로 변했다.", ""]
+             "'" + topic + "'을 둘러싼 조건은 비용·운영 구조 자체를 바꾸고 있다.", ""]
     if facts:
         lines.append("실전 근거:")
         lines.append("")
@@ -824,22 +869,22 @@ def _build_article(
         + narrative_line + angle_line + facts_block + hint_line + research_ctx + "\n\n"
         "=== 파트 1: 한국어 블로그 글 ===\n\n"
         "규칙:\n"
-        "- 800~1200단어 분량의 분석 에세이 (뉴스 요약 금지)\n"
+        "- 뉴스 요약 금지. 숨은 메커니즘 중심의 통찰 글로 작성\n"
+        "- 시작 1~2줄은 놀라운 관찰/모순으로 시작\n"
+        "- 인프라/개발 워크플로우/비용 구조/인센티브 중 최소 2개 축으로 설명\n"
+        "- 5~7줄의 생생한 시나리오 1개 포함\n"
+        "- 마지막은 바로 써먹을 수 있는 실행 한 줄로 마무리\n"
         '- 제목/본문에서 "' + topic + '" 원문 표현은 최대 2회. 이후엔 "' + t_kr + '" 또는 동의어 사용.\n'
-        '- "정리", "최근 동향", "소개", "무엇이 달라졌고" 표현 사용 금지\n'
+        '- 금지 표현: "무엇이 달라졌고", "이 주제", "최근 6개월", "정리", "소개", "동향"\n'
+        '- 메타데이터 라벨 금지: "출처:", "URL 컨텍스트:", "관련 기술/기업:"\n'
+        "- 약한 도발/가벼운 유머는 허용하지만 사실성은 유지\n"
         "- 플레이스홀더 문장 금지 — 모든 문장이 구체적이고 실질적이어야 함\n"
         "- 반드시 다음 구조를 포함:\n"
         "  ## TL;DR\n"
         "  ## Why it matters\n"
-        "  ## 핵심 주장 (Thesis)\n"
-        "  ## 변화의 핵심\n"
-        "  ## 실전 체크리스트\n"
-        "  ## 실패 사례와 한계\n"
-        "  ## 결론: 남는 한 마디\n"
+        "  ## Article\n"
         "  ## 근거/출처\n"
-        "- 체크리스트는 `- [ ]` 형식으로 3~7개 항목\n"
-        "- 서두는 2줄짜리 훅으로 시작, 그 다음 `---` 구분선\n"
-        "- 다른 초안과 완전히 다른 관점/사례/비유를 사용할 것\n\n"
+        "- 다른 초안과 겹치지 않게 관점/비유를 바꿀 것\n\n"
         "=== 파트 2: 영어 X 스레드 ===\n\n"
         "규칙:\n"
         "- 7~9개 트윗, 각 240자 이하\n"
@@ -873,6 +918,7 @@ def _build_article(
                 ),
                 user_prompt=prompt,
                 max_tokens=3500,
+                stage="write",
             )
             if len(result) >= 900:
                 result = _cap_topic_repetitions(result, topic, t_kr, limit=2)
@@ -898,7 +944,10 @@ def _build_article(
     blog_section = "\n\n".join([
         "## BLOG ARTICLE (KR)", "",
         hook_text, "---",
-        tldr, why_fixed, thesis, why, checklist, failures, closing, sources_sec,
+        tldr, why_fixed,
+        "## Article", "",
+        thesis, why, checklist, failures, closing,
+        sources_sec,
     ])
 
     x_thread = _enforce_x_limits(_build_x_thread_template(t_kr, lens_id, hook, domain_angle))

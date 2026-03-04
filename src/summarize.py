@@ -20,6 +20,7 @@ from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from collect import SourceItem
+from env_loader import get_model
 
 
 @dataclass
@@ -220,7 +221,7 @@ def rewrite_topic(raw: str, lens_label: str = "") -> dict:
     )
     try:
         payload = json.dumps({
-            "model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+            "model": get_model("summarize"),
             "messages": [{"role": "user", "content": user_msg}],
             "temperature": 0.3,
             "max_tokens": 200,

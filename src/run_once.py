@@ -30,6 +30,11 @@ import urllib.request as _urllib_req     # noqa: F401 – triggers full stdlib c
 sys.path.insert(0, _SRC_DIR)
 # ---- end fix ----
 
+from env_loader import get_model, load_dotenv
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(_PROJECT_ROOT / ".env")
+
 import argparse
 import importlib.util
 import json
@@ -39,10 +44,11 @@ from typing import Iterable
 
 from collect import collect_sources, load_source_targets
 from summarize import summarize_items
-from write import generate_drafts, draft_passes_quality
+from write import LENSES, draft_passes_quality, generate_drafts, rewrite_with_feedback
 from research import extract_patterns, load_patterns
 from render import make_timestamp, render_markdown, save_markdown
 from learn import log_run
+from critic import critique_draft
 from topic_memory import (
     append_topic_memory,
     is_topic_in_memory,
@@ -66,6 +72,7 @@ _sel = _load_select_module()
 load_bandit_state = _sel.load_bandit_state
 save_bandit_state = _sel.save_bandit_state
 choose_best_draft = _sel.choose_best_draft
+score_draft = getattr(_sel, "score_draft", None)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -343,6 +350,55 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
     drafts = generate_drafts(target_summary, count=5, topic_hint=topic_hint,
                              research_patterns=research_patterns)
 
+    # --- 5.5 Critic + one rewrite pass ---
+    print("[pipeline] 5.5/9  Critic + rewrite …", file=sys.stderr)
+    for d in drafts:
+        lens_label = LENSES.get(getattr(d, "lens", ""), {}).get("label", getattr(d, "lens", ""))
+        critique = critique_draft(
+            getattr(d, "body", "") or "",
+            getattr(target_summary, "topic_kr", "") or "",
+            lens_label,
+        )
+        setattr(d, "critique", critique)
+
+    rewrite_idx = 0
+    if callable(score_draft):
+        try:
+            tmp_state = load_bandit_state(data_dir / "bandit_state.json")
+            tmp_runs = _load_recent_runs(data_dir / "runs.jsonl", n=60)
+            scored = []
+            for i, d in enumerate(drafts):
+                scored_result = score_draft(
+                    d,
+                    tmp_state,
+                    topic_hint=topic_hint,
+                    summary=target_summary,
+                    topic_memory=topic_memory,
+                    recent_runs=tmp_runs,
+                )
+                if isinstance(scored_result, tuple):
+                    total = float(scored_result[0])
+                elif isinstance(scored_result, (int, float)):
+                    total = float(scored_result)
+                else:
+                    total = 0.0
+                scored.append((total, i))
+            rewrite_idx = max(scored, key=lambda x: x[0])[1]
+        except Exception:
+            rewrite_idx = 0
+
+    if drafts:
+        target = drafts[rewrite_idx]
+        lens_label = LENSES.get(getattr(target, "lens", ""), {}).get("label", getattr(target, "lens", ""))
+        rewritten = rewrite_with_feedback(
+            getattr(target, "body", "") or "",
+            getattr(target_summary, "topic_kr", "") or "",
+            lens_label,
+            getattr(target, "critique", {}) or {},
+        )
+        if rewritten and rewritten.strip():
+            target.body = rewritten
+
     # --- 6. Quality gate (+ optional regen) ---
     print("[pipeline] 6/9  Quality gate …", file=sys.stderr)
     drafts = _quality_gate_with_regen(target_summary, topic_hint, drafts)
@@ -415,6 +471,10 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
 def main() -> None:
     args = _parse_args()
     project_root = Path(__file__).resolve().parents[1]
+    print("[model routing]", file=sys.stderr)
+    print(f"summarize={get_model('summarize')}", file=sys.stderr)
+    print(f"write={get_model('write')}", file=sys.stderr)
+    print(f"critic={get_model('critic')}", file=sys.stderr)
     try:
         final_file, candidate_files = run_once(project_root, slot=args.slot, seed=args.seed)
     except Exception as exc:
