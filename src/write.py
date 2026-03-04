@@ -369,7 +369,7 @@ def _extract_evidence(summary_text: str) -> list[str]:
     for m in _COMPANY_CTX_RE.finditer(text):
         phrase = m.group(0).strip()
         if len(phrase) >= 4 and phrase.lower() not in {"the", "this", "that"}:
-            candidates.append(phrase + " announced a concrete change")
+            candidates.append(phrase + " appears in the source headline")
 
     if not candidates:
         return []
@@ -424,9 +424,9 @@ def _cap_topic_repetitions(text: str, topic: str, topic_kr: str, limit: int = 2)
 
     capped = _normalise_quotes(text)
     if topic:
-        capped = _cap_phrase(capped, topic, topic_kr or "해당 기술", ignore_case=True)
+        capped = _cap_phrase(capped, topic, topic_kr or "이 스택", ignore_case=True)
     if topic_kr:
-        capped = _cap_phrase(capped, topic_kr, "해당 기술", ignore_case=False)
+        capped = _cap_phrase(capped, topic_kr, "이 스택", ignore_case=False)
     return capped
 
 
@@ -474,66 +474,63 @@ def _build_title(hook: str, lens_id: str, topic: str, topic_hint: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _build_hook(hook: str, topic: str, topic_hint: str, evidence: list[str]) -> str:
-    hint_ref = ""
-    if topic_hint and topic_hint.lower() not in topic.lower():
-        hint_ref = f" '{topic_hint}'의 흐름 속에서"
-    ev_snippet = ""
-    if evidence:
-        ev_snippet = f" {evidence[0].rstrip('.')}라는 사실이 이를 뒷받침한다."
-
+    ev = evidence[0].strip() if evidence else "하루 비용 상한, 실패 복구 규칙, 응답 시간 SLO"
     if hook == "Q":
         return (
-            f"'{topic}'이라는 키워드가 타임라인을 채우고 있지만, "
-            f"실제로 업무 루프를 바꾼 팀은 얼마나 될까?{hint_ref}\n"
-            f"도구를 도입하는 것과, 도구가 일하게 만드는 것은 완전히 다른 문제다.{ev_snippet}"
+            f"'{topic}'이 성능 문제라고 믿는다면, 아마 원인을 잘못 찍었다.\n"
+            f"진짜 병목은 모델이 아니라 운영 제약이다: {ev}."
         )
     if hook == "S":
         return (
-            f"지난 분기{hint_ref} '{topic}' 관련 프로젝트 수가 급증했다.\n"
-            f"하지만 증가한 것은 '시도'이지 '성공'이 아니다.{ev_snippet}"
+            f"나는 '{topic}' 도입 실패를 모델 품질에서 거의 본 적이 없다.\n"
+            f"대부분은 예산 상한, 시간 제한, 장애 복구 규칙을 안 정해서 터진다: {ev}."
         )
+    extra = f" 추가 맥락: {topic_hint}." if topic_hint and topic_hint.lower() not in topic.lower() else ""
     return (
-        f"'{topic}'을 도입했다가 3개월 만에 롤백한 팀이 늘고 있다.{hint_ref}\n"
-        f"기술이 문제가 아니라, 적용 방식이 문제였다.{ev_snippet}"
+        f"네 팀의 '{topic}' 실험이 막혔다면, 코드가 아니라 운영 설계가 비어 있을 가능성이 높다.{extra}\n"
+        f"실패 모드는 늘 같다: 비용 폭주, 타임아웃, 롤백 루프."
     )
 
 
 def _build_thesis(hook: str, lens_id: str, topic: str, domain_angle: str) -> str:
     lens = LENSES[lens_id]
     if hook == "Q":
-        opinion = (f"'{topic}'의 가치는 기능 자체가 아니라, "
-                   f"반복 가능한 자동화 루프를 얼마나 빠르게 만들 수 있느냐에 달려 있다.")
+        opinion = (f"핵심은 기능이 아니라 제약 설계다. "
+                   f"예산 상한 1개, 실패 복구 규칙 1개, 지연 한도 1개가 없으면 '{topic}'은 바로 불안정해진다.")
     elif hook == "S":
-        opinion = (f"'{topic}' 채택률이 높아진 것은 기술 성숙도 때문이 아니다. "
-                   f"기존 워크플로우의 비용이 임계점을 넘었기 때문이다.")
+        opinion = (f"채택 속도보다 중요한 건 운영 단위 비용이다. "
+                   f"요청당 비용, 재시도 횟수, 장애 복구 시간을 못 재면 '{topic}'은 실전에서 무너진다.")
     else:
-        opinion = (f"'{topic}'이 실패하는 대부분의 이유는 기술적 한계가 아니라, "
-                   f"측정 없는 도입과 설계 없는 확장이다.")
+        opinion = (f"실패의 다수는 모델 한계가 아니라 실행 설계 부재다. "
+                   f"SLO 없이 확장하면 타임아웃과 롤백이 누적된다.")
     return "\n".join([
         "## 핵심 주장 (Thesis)", "",
         opinion, "",
+        "핫테이크: 좋은 프롬프트보다 좋은 롤백 규칙이 매출을 지킨다.",
+        "핫테이크: 모델 교체보다 장애 플레이북 1장이 더 싸다.",
         f"> {lens['label']} 관점의 핵심 질문: {lens['question']}",
         f"> 이 글은 이 질문을 {domain_angle}의 맥락에서 검증한다.",
     ])
 
 
-def _build_why_it_matters(topic: str, facts: list[str], domain_angle: str) -> str:
+def _build_why_it_matters(topic: str, facts: list[str], domain_angle: str, weak_evidence: bool = False) -> str:
     lines = ["## 변화의 핵심", "",
-             "'" + topic + "'을 둘러싼 조건은 비용·운영 구조 자체를 바꾸고 있다.", ""]
+             "'" + topic + "'의 승패는 기능 개수보다 운영 제약을 먼저 못 박았는지에서 갈린다.", ""]
     if facts:
-        lines.append("실전 근거:")
-        lines.append("")
         for ev in facts[:4]:
             lines.append("- " + ev)
         lines.append("")
-    else:
+    if weak_evidence or not facts:
         lines.append(_NO_EVIDENCE_NOTICE)
+        lines.append("")
+        lines.append("근거는 약하다. 그래서 이렇게 확인해라")
+        lines.append("1) 7일 동안 요청당 비용/지연/재시도 횟수를 로그로 고정 수집한다.")
+        lines.append("2) 동일 작업을 자동화/수동으로 각각 20건 실행해 실패 모드와 복구 시간을 비교한다.")
         lines.append("")
     lines.extend([
         "이 변화의 핵심은 " + domain_angle + "에 있다. "
-        "단순히 새로운 도구가 등장한 것이 아니라, "
-        "기존 운영 비용 구조가 더 이상 지속 불가능해졌다는 점이다.", "",
-        "결국 문제는 '도입 여부'가 아니라 '어떤 설계로 도입하느냐'다.",
+        "도입 여부보다 운영 비용 구조를 먼저 설계한 팀이 이긴다.", "",
+        "핫테이크: 기능 데모는 1시간이면 만들고, 운영 안정성은 1주가 걸린다.",
     ])
     return "\n".join(lines)
 
@@ -571,39 +568,20 @@ def _build_checklist(structure: str, topic: str) -> str:
     return "\n".join(lines)
 
 
-def _build_failure_cases(hook: str, lens_id: str, topic: str) -> str:
+def _build_failure_cases(hook: str, lens_id: str, topic: str, weak_evidence: bool = False) -> str:
     lens = LENSES[lens_id]
     lines = ["## 실패 사례와 한계", ""]
-    if hook == "Q":
-        lines.extend([
-            "### 흔한 실패 패턴", "",
-            f"1. **측정 없는 도입**: '{topic}'을 도입했지만 성과 지표를 정의하지 않아 "
-            f"3개월 후 '효과 불명'으로 폐기되는 경우가 가장 많다.", "",
-            "2. **과도한 자동화 범위**: 처음부터 전체 파이프라인을 자동화하려다 "
-            "복잡도가 폭발해 유지보수 비용이 수작업보다 높아지는 역설.", "",
-            "3. **컨텍스트 비용 무시**: 토큰 비용, API 호출 빈도, 컨텍스트 윈도우 제한을 "
-            "고려하지 않고 설계해 운영 비용이 선형 이상으로 증가.",
-        ])
-    elif hook == "S":
-        lines.extend([
-            f"### {lens['label']} 관점에서 본 리스크", "",
-            "1. **데이터가 보여주지 않는 것**: 채택률 증가가 곧 성공을 의미하지 않는다. "
-            "대부분의 팀이 PoC 단계에서 멈추며, 프로덕션 전환율은 20% 미만이다.", "",
-            "2. **벤더 종속 리스크**: 특정 API/모델에 의존하는 설계는 "
-            "가격 정책 변경 시 전체 파이프라인이 마비된다.", "",
-            "3. **운영 복잡도 과소평가**: 자동화 시스템 자체의 모니터링, "
-            "장애 대응, 버전 관리에 드는 숨은 비용을 간과하는 경우가 많다.",
-        ])
-    else:
-        lines.extend([
-            "### 왜 롤백하게 되는가", "",
-            f"1. **설계 없는 확장**: '{topic}'의 초기 성공에 고무되어 범위를 급격히 늘리면 "
-            "아키텍처가 감당하지 못한다.", "",
-            "2. **팀 역량과의 불일치**: 도구의 복잡도가 팀의 운영 역량을 초과하면 "
-            "자동화가 오히려 병목이 된다.", "",
-            "3. **피드백 루프 부재**: 결과를 측정하지 않으면 "
-            "개선 방향을 알 수 없고, 동일한 실패를 반복한다.",
-        ])
+    lines.extend([
+        "마이크로 스토리: 4명 팀이 주간 예산 상한과 2초 지연 제한으로 자동화 루프를 붙였다.",
+        "첫 주에 실패 모드는 한 가지였다: 재시도 폭주로 큐가 밀리면서 장애가 연쇄 발생했다.",
+        "해결은 화려하지 않았다: 일일 비용 컷오프, 재시도 2회 제한, 수동 fallback 버튼을 넣었다.",
+        "교훈은 간단했다: 모델 교체보다 운영 제약 3개를 먼저 고정하는 편이 복구 시간을 줄였다.",
+    ])
+    if weak_evidence:
+        lines.append("")
+        lines.append("추가 점검: 근거 밀도가 낮으니 로그 수집 기간(최소 7일)을 먼저 확보해야 한다.")
+    lines.append("")
+    lines.append(f"{lens['label']} 관점의 리스크: SLO 없는 확장은 성공 사례보다 실패 모드를 더 빨리 증폭시킨다.")
     return "\n".join(lines)
 
 
@@ -611,22 +589,18 @@ def _build_closing(hook: str, topic: str, domain_angle: str) -> str:
     lines = ["## 결론: 남는 한 마디", ""]
     if hook == "Q":
         lines.append(
-            f"'{topic}'의 진짜 가치는 '무엇을 할 수 있느냐'가 아니라, "
-            f"'무엇을 반복할 수 있느냐'에 있다. "
-            f"{domain_angle}을 이해한 팀만이 자동화를 '운영'으로 전환할 수 있다."
+            f"'{topic}'의 가치는 기능 목록이 아니라 반복 가능한 운영 루프에서 나온다. "
+            f"치트코드: 다음 스프린트에서 비용 상한 1개, 실패 복구 규칙 1개, 지연 한도 1개부터 고정하라."
         )
     elif hook == "S":
         lines.append(
-            f"숫자는 방향을 보여주지만, 도착지를 보장하지 않는다. "
-            f"'{topic}'의 데이터를 읽을 때는 항상 '{domain_angle}'이라는 "
-            f"필터를 함께 적용해야 왜곡을 피할 수 있다."
+            f"데이터는 방향만 보여주고, 운영 설계가 결과를 만든다. "
+            f"치트코드: 7일 로그에서 실패 상위 1개만 제거해도 체감 품질이 먼저 오른다."
         )
     else:
         lines.append(
-            f"실패는 기술 자체의 문제가 아니다. "
-            f"'{topic}'이 실패하는 이유는 대부분 측정 부재와 설계 부재로 귀결된다. "
-            f"작게 시작하고, 측정하고, 반복하라. "
-            f"{domain_angle}은 이 루프 위에서만 의미를 갖는다."
+            f"실패는 보통 기술이 아니라 운영 규칙의 빈칸에서 시작된다. "
+            f"치트코드: 주간 배포 전에 '비용-지연-복구' 3개 체크리스트를 통과하지 못하면 배포를 멈춰라."
         )
     return "\n".join(lines)
 
@@ -640,17 +614,26 @@ def _build_tldr(topic_kr: str, key_claims: list[dict]) -> str:
     return "## TL;DR\n\n" + _truncate_text(base + "의 성패는 도입 속도보다 운영 설계의 정밀도에서 갈린다.", 120)
 
 
-def _build_why_it_matters_fixed(topic_kr: str, key_claims: list[dict], domain_angle: str) -> str:
+def _build_why_it_matters_fixed(
+    topic_kr: str,
+    key_claims: list[dict],
+    domain_angle: str,
+    weak_evidence: bool = False,
+) -> str:
     lines = ["## Why it matters", ""]
     first_ev = ""
     if key_claims:
         evs = key_claims[0].get("evidence", []) or []
         if evs:
             first_ev = str(evs[0]).strip()
-    lines.append(f"{topic_kr} 흐름은 기능 경쟁이 아니라 운영 비용 구조를 재편한다.")
+    lines.append(f"{topic_kr} 승부는 기능 비교가 아니라 비용/지연/복구 제약을 먼저 잠그는 팀에게 돌아간다.")
     if first_ev:
-        lines.append(_truncate_text(f"관찰 가능한 신호는 '{first_ev}' 같은 구체 근거로 확인된다.", 140))
-    lines.append(_truncate_text(domain_angle + " 관점에서 보면, 도입 속도보다 검증 가능한 루프 설계가 성과를 가른다.", 140))
+        lines.append(_truncate_text(f"헤드라인 근거: '{first_ev}'처럼 측정 가능한 단서가 있다.", 140))
+    if weak_evidence:
+        lines.append("근거는 약하다. 그래서 이렇게 확인해라")
+        lines.append("1) 동일 작업 20건을 자동화/수동으로 나눠 실패 모드와 복구 시간을 비교한다.")
+        lines.append("2) 7일간 건당 비용과 재시도 횟수를 기록해 임계치를 넘는 구간을 찾는다.")
+    lines.append(_truncate_text(domain_angle + " 관점에서 도입 속도보다 운영 루프 설계가 먼저다.", 130))
     return "\n".join(lines)
 
 
@@ -690,6 +673,21 @@ def _build_sources_section(summary_urls: list[str], key_claims: list[dict]) -> s
         lines.append("근거 스니펫:")
         lines.extend(ev_lines)
     return "\n".join(lines)
+
+
+def _is_weak_evidence(key_claims: list[dict], facts: list[str]) -> bool:
+    if facts:
+        return False
+    if not key_claims:
+        return True
+    strong = 0
+    for kc in key_claims:
+        conf = str(kc.get("confidence", "")).lower().strip()
+        evs = [str(e).strip() for e in kc.get("evidence", []) if str(e).strip()]
+        has_num_or_quote = any(re.search(r"\b\d[\d,]*(?:\.\d+)?\b|\"[^\"]+\"", e) for e in evs)
+        if conf in {"high", "med"} and has_num_or_quote:
+            strong += 1
+    return strong == 0
 
 
 # ---------------------------------------------------------------------------
@@ -848,6 +846,7 @@ def _build_article(
     }
 
     safe_claims = list(key_claims or [])
+    weak_evidence = _is_weak_evidence(safe_claims, facts)
 
     if facts:
         facts_block = "\n\n배경 정보 (분석에 녹여낼 것):\n" + "\n".join("- " + f for f in facts)
@@ -869,15 +868,19 @@ def _build_article(
         + narrative_line + angle_line + facts_block + hint_line + research_ctx + "\n\n"
         "=== 파트 1: 한국어 블로그 글 ===\n\n"
         "규칙:\n"
+        "- 톤: 약간 까칠하지만 도움이 되는 X 인사이트 톤 (기업 홍보체/교과서체 금지)\n"
+        "- 시작 1~2줄은 '네가 틀렸을 수도 있다' 급의 강한 펀치로 시작\n"
         "- 뉴스 요약 금지. 숨은 메커니즘 중심의 통찰 글로 작성\n"
-        "- 시작 1~2줄은 놀라운 관찰/모순으로 시작\n"
         "- 인프라/개발 워크플로우/비용 구조/인센티브 중 최소 2개 축으로 설명\n"
-        "- 5~7줄의 생생한 시나리오 1개 포함\n"
-        "- 마지막은 바로 써먹을 수 있는 실행 한 줄로 마무리\n"
+        "- 미시 사례 1개 필수: 한 팀, 한 제약(예산/시간), 한 실패, 한 교훈\n"
+        "- 짧고 도발적인 hot take 문장 2~3개 포함 (X에 바로 인용 가능한 길이)\n"
+        "- 마지막은 바로 써먹는 cheat code 한 줄로 마무리\n"
+        "- 각 문단에는 최소 1개의 구체 객체를 넣을 것: 숫자/제약/실패모드/비용/시간/운영 디테일 중 하나\n"
         '- 제목/본문에서 "' + topic + '" 원문 표현은 최대 2회. 이후엔 "' + t_kr + '" 또는 동의어 사용.\n'
-        '- 금지 표현: "무엇이 달라졌고", "이 주제", "최근 6개월", "정리", "소개", "동향"\n'
+        '- 금지 표현: "신호는 이미", "요즘", "최근 몇 년", "무엇이 달라졌고", "이 주제", "정리", "소개", "동향"\n'
         '- 메타데이터 라벨 금지: "출처:", "URL 컨텍스트:", "관련 기술/기업:"\n'
         "- 약한 도발/가벼운 유머는 허용하지만 사실성은 유지\n"
+        "- 근거가 약하면 반드시 이 문장을 포함: '근거는 약하다. 그래서 이렇게 확인해라' + 검증 단계 2개\n"
         "- 플레이스홀더 문장 금지 — 모든 문장이 구체적이고 실질적이어야 함\n"
         "- 반드시 다음 구조를 포함:\n"
         "  ## TL;DR\n"
@@ -908,13 +911,14 @@ def _build_article(
         try:
             result = _call_llm(
                 system_prompt=(
-                    "Write a technology article that is insightful, slightly provocative, "
-                    "and understandable even to non-experts. "
-                    "Tone: an engineer explaining a surprising insight. "
-                    "Avoid generic AI blog phrases. "
-                    "Start with a surprising observation, explain hidden mechanism, "
-                    "show one concrete example, then end with a forward-looking insight. "
-                    "The output should feel like a sharp tech insight someone would share on X."
+                    "Write in an insight meme voice: sharp, slightly rude-but-helpful, "
+                    "and readable to non-experts. No corporate tone. No textbook tone. "
+                    "Open with a punch that challenges the reader's assumption. "
+                    "Roast bad implementations with concrete operational detail. "
+                    "Every paragraph must include at least one concrete object: number, "
+                    "constraint, failure mode, cost, time estimate, or operational detail. "
+                    "Add 2-3 quotable hot takes. End with one cheat-code takeaway. "
+                    "Never use banned phrases or metadata labels."
                 ),
                 user_prompt=prompt,
                 max_tokens=3500,
@@ -933,11 +937,11 @@ def _build_article(
     # Template fallback
     hook_text = _build_hook(hook, t_kr, topic_hint, facts)
     tldr = _build_tldr(t_kr, safe_claims)
-    why_fixed = _build_why_it_matters_fixed(t_kr, safe_claims, domain_angle)
+    why_fixed = _build_why_it_matters_fixed(t_kr, safe_claims, domain_angle, weak_evidence=weak_evidence)
     thesis = _build_thesis(hook, lens_id, t_kr, domain_angle)
-    why = _build_why_it_matters(t_kr, facts, domain_angle)
+    why = _build_why_it_matters(t_kr, facts, domain_angle, weak_evidence=weak_evidence)
     checklist = _build_checklist(structure, t_kr)
-    failures = _build_failure_cases(hook, lens_id, t_kr)
+    failures = _build_failure_cases(hook, lens_id, t_kr, weak_evidence=weak_evidence)
     closing = _build_closing(hook, t_kr, domain_angle)
     sources_sec = _build_sources_section(source_urls or [], safe_claims)
 
