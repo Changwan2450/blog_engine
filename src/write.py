@@ -222,6 +222,10 @@ STYLE RULES (HARD):
 6) Never output metadata fragments:
    - "관련 기술/기업:" "출처:" "URL 컨텍스트:" "source headline" "appears in the source headline"
 7) Avoid placeholders like "해당 기술", "이 스택" 남발. Use the subject naturally.
+8) Ban these phrases globally: "단순했다", "요즘", "최근 몇 년", "무엇이 달라졌고", "이 주제", "승부는 기능 비교가 아니라", "예를 들어", "도입 속도보다", "먼저다".
+9) No empty sections. Article section must be >= 900 Korean chars.
+10) Each paragraph must include at least one concrete object token: budget cap, retry count, timeout, queue depth, p95, canary %, alert rule, cache hit ratio, SLO.
+11) Exactly 2 hot-take lines.
 
 OUTPUT FORMAT (HARD):
 ## TL;DR
@@ -233,7 +237,7 @@ OUTPUT FORMAT (HARD):
 ## Article
 - 5–10 short paragraphs.
 - Must include the micro-story.
-- Must include 2–3 hot-take lines.
+- Must include exactly 2 hot-take lines.
 
 ## 근거/출처
 - 2–4 bullet links: "domain: url"
@@ -364,6 +368,7 @@ _EVIDENCE_ARTIFACT_RE = re.compile(
     r"(appears in the source headline|source headline|소스 텍스트에|단서가 반복된다)",
     re.IGNORECASE,
 )
+_EVIDENCE_STOP_TOKENS = {"there", "new", "in", "town", "the", "a", "an", "of", "to", "for"}
 _QUOTE_TRANSLATION = str.maketrans({
     "“": '"',
     "”": '"',
@@ -390,8 +395,22 @@ def _clean_evidence_text(text: str) -> str:
     return t
 
 
+def _is_valid_evidence_snippet(text: str) -> bool:
+    s = _clean_evidence_text(text)
+    if len(s) < 12:
+        return False
+    if re.fullmatch(r"[A-Za-z]{1,12}", s):
+        return False
+    token = re.sub(r"[^A-Za-z]", "", s).lower()
+    if token in _EVIDENCE_STOP_TOKENS:
+        return False
+    return True
+
+
 def _narrative_evidence_sentence(ev: str, idx: int) -> str:
     e = _clean_evidence_text(ev)
+    if not _is_valid_evidence_snippet(e):
+        e = "공개 장애 사례"
     if not e:
         e = "외부 공개 사례"
     variants = [
@@ -849,6 +868,8 @@ def _build_sources_section(summary_urls: list[str], key_claims: list[dict]) -> s
             t = str(ev).strip()
             if not t or _METADATA_FRAGMENT_RE.search(t):
                 continue
+            if not _is_valid_evidence_snippet(t):
+                continue
             ev_lines.append("- " + _truncate_text(t, 130))
             if len(ev_lines) >= 2:
                 break
@@ -974,6 +995,29 @@ def _enforce_x_limits_on_full_output(text: str) -> str:
     return head.rstrip() + "\n\n" + marker + "\n\n" + limited
 
 
+def _extract_section(full_text: str, header: str, next_headers: list[str]) -> str:
+    if header not in full_text:
+        return ""
+    start = full_text.find(header) + len(header)
+    tail = full_text[start:]
+    end_pos = len(tail)
+    for nh in next_headers:
+        i = tail.find(nh)
+        if i != -1:
+            end_pos = min(end_pos, i)
+    return tail[:end_pos].strip()
+
+
+def _output_has_required_sections(text: str) -> bool:
+    required = ["## TL;DR", "## Why it matters", "## Article", "## 근거/출처", "## X Thread"]
+    return all(r in text for r in required)
+
+
+def _article_section_len(text: str) -> int:
+    sec = _extract_section(text, "## Article", ["## 근거/출처", "## X Thread", "---"])
+    return len(sec)
+
+
 # ---------------------------------------------------------------------------
 # Assemble full article body (blog + X thread)
 # ---------------------------------------------------------------------------
@@ -1065,16 +1109,18 @@ def _build_article(
         "- 시작 1~2줄은 '네가 틀렸을 수도 있다' 급의 강한 펀치로 시작\n"
         "- 뉴스 요약 금지. 숨은 메커니즘 중심의 통찰 글로 작성\n"
         "- 인프라/개발 워크플로우/비용 구조/인센티브 중 최소 2개 축으로 설명\n"
-        "- 미시 사례 1개 필수: 한 팀, 한 제약(예산/시간), 한 실패, 한 교훈\n"
+        "- 미시 사례 1개 필수: 팀 규모 + 제약(예산/지연/retry) + 실패 모드 + 수정 조치 + 숫자 결과\n"
         "- 짧고 도발적인 hot take 문장 정확히 2개 포함 (X에 바로 인용 가능한 길이)\n"
         "- 마지막은 바로 써먹는 cheat code 한 줄로 마무리\n"
-        "- 각 문단에는 최소 1개의 구체 객체를 넣을 것: 숫자/제약/실패모드/비용/시간/운영 디테일 중 하나\n"
+        "- 각 문단에는 최소 1개의 구체 객체를 넣을 것: budget cap, retry count, timeout, queue depth, p95, canary %, alert rule, cache hit ratio, SLO\n"
         '- 제목/본문에서 "' + topic + '" 원문 표현은 최대 2회. 이후엔 "' + t_kr + '" 또는 동의어 사용.\n'
-        '- 금지 표현: "신호는 이미", "요즘", "최근 몇 년", "무엇이 달라졌고", "이 주제", "정리", "소개", "동향"\n'
+        '- 금지 표현: "단순했다", "요즘", "최근 몇 년", "무엇이 달라졌고", "이 주제", "승부는 기능 비교가 아니라", "예를 들어", "도입 속도보다", "먼저다"\n'
         '- 메타데이터 라벨 금지: "출처:", "URL 컨텍스트:", "관련 기술/기업:"\n'
         "- 약한 도발/가벼운 유머는 허용하지만 사실성은 유지\n"
         "- 근거가 약하면 반드시 이 문장을 포함: '근거가 약하다. 그래서 이렇게 확인해라:' + 검증 단계 2개\n"
         "- 플레이스홀더 문장 금지 — 모든 문장이 구체적이고 실질적이어야 함\n"
+        "- Article 본문은 최소 900자 이상\n"
+        "- 빈 섹션 금지\n"
         "- 반드시 다음 구조를 포함:\n"
         "  ## TL;DR\n"
         "  ## Why it matters\n"
@@ -1109,7 +1155,8 @@ def _build_article(
                 max_tokens=3500,
                 stage="write",
             )
-            if len(result) >= 900:
+            ok = len(result) >= 1200 and _output_has_required_sections(result) and _article_section_len(result) >= 900
+            if ok:
                 if hook_line:
                     blog_marker = "## BLOG ARTICLE (KR)"
                     if blog_marker in result:
@@ -1120,8 +1167,32 @@ def _build_article(
                 result = _cap_topic_repetitions(result, topic, t_kr, limit=2)
                 result = _enforce_x_limits_on_full_output(result)
                 return _detemplate_output_blog_section(result)
-            print("[write] WARN  LLM output too short (%d chars); using template" % len(result),
-                  file=sys.stderr)
+            retry_prompt = (
+                prompt
+                + "\n\nYou under-produced. Expand Article with micro-story + numbers. "
+                  "Keep banned phrases avoided and preserve required headings."
+            )
+            retried = _call_llm(
+                system_prompt=_WRITER_SYSTEM_PROMPT,
+                user_prompt=retry_prompt,
+                max_tokens=3800,
+                stage="write",
+            )
+            ok_retry = (
+                len(retried) >= 1200
+                and _output_has_required_sections(retried)
+                and _article_section_len(retried) >= 900
+            )
+            if ok_retry:
+                if hook_line and "## BLOG ARTICLE (KR)" in retried:
+                    h, r = retried.split("## BLOG ARTICLE (KR)", 1)
+                    r = r.lstrip()
+                    if not r.startswith(hook_line):
+                        retried = h + "## BLOG ARTICLE (KR)\n\n" + hook_line + "\n\n" + r
+                retried = _cap_topic_repetitions(retried, topic, t_kr, limit=2)
+                retried = _enforce_x_limits_on_full_output(retried)
+                return _detemplate_output_blog_section(retried)
+            print("[write] WARN  LLM output too short (%d chars); using template" % len(retried), file=sys.stderr)
         except (URLError, KeyError, json.JSONDecodeError, RuntimeError, OSError) as exc:
             print("[write] WARN  LLM call failed (%s); using template fallback" % exc,
                   file=sys.stderr)

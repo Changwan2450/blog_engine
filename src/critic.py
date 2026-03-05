@@ -19,12 +19,13 @@ YOU CHECK (HARD):
 3) Micro-story completeness: team size + constraint + failure mode + fix + numeric outcome.
 4) At least 3 concrete operational details exist:
    (cost cap / retry rule / timeout / SLO / rollout / logs / alerts / canary / queue)
-5) 2–3 quotable hot-take lines exist.
+5) Exactly 2 quotable hot-take lines exist.
 6) Banned phrase presence must be flagged and rewritten:
    - 요즘, 최근 몇 년, 신호는 이미, 무엇이 달라졌고, 이 주제, 정리, 소개, 동향
    - 관련 기술/기업:, 출처:, URL 컨텍스트:
    - source headline, appears in the source headline, 소스 텍스트에, 단서가 반복된다
 7) List generic sentences that could fit any topic.
+8) Flag evidence junk tokens (single English token noise like There/New/In/Town).
 
 OUTPUT JSON SCHEMA (STRICT):
 {

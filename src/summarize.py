@@ -277,15 +277,25 @@ _SECONDARY_ENTITIES = [
     "Kubernetes", "Rust", "Meta", "Anthropic", "GitHub", "Cloudflare", "Netflix",
 ]
 
+_EVIDENCE_STOP_TOKENS = {"there", "new", "in", "town", "the", "a", "an", "of", "to", "for"}
+
 
 def _sanitize_fragments(values: list[str]) -> list[str]:
     clean: list[str] = []
     for v in values:
         if not v:
             continue
+        s = v.strip()
+        if len(s) < 12:
+            continue
+        if re.fullmatch(r"[A-Za-z]{1,12}", s):
+            continue
+        token = re.sub(r"[^A-Za-z]", "", s).lower()
+        if token in _EVIDENCE_STOP_TOKENS:
+            continue
         if any(bad in v for bad in _BANNED_KEYPOINT_FRAGMENTS):
             continue
-        clean.append(v.strip())
+        clean.append(s)
     return clean
 
 
@@ -338,7 +348,10 @@ def _confidence_for_claim(claim: str, evidence: list[str]) -> str:
 def _build_key_claims(item: SourceItem) -> list[dict]:
     title = item.title.strip()
     reader_text = str(getattr(item, "reader_text", "") or "")
-    source_text = (title + " " + reader_text[:1600]).strip()
+    if len(reader_text.strip()) >= 500:
+        source_text = (title + " " + reader_text[:1600]).strip()
+    else:
+        source_text = title
     claims: list[dict] = []
 
     quoted: list[str] = []
