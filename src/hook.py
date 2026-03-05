@@ -1,26 +1,7 @@
 import random
 import re
 
-HOOK_PATTERNS = [
-    "{topic}가 망하는 진짜 이유는 모델이 아니라 {object}다.",
-    "사람들은 {topic}을 모델 문제로 보지만 실제 병목은 {object}다.",
-    "{topic} 프로젝트가 터지는 순간은 항상 {object}에서 시작된다.",
-    "대부분의 {topic} 실패는 코드가 아니라 {object} 설정에서 나온다.",
-    "{topic}에서 사람들이 가장 많이 착각하는 건 {object}다.",
-]
-
-OBJECTS = [
-    "retry 규칙",
-    "timeout",
-    "SLO",
-    "budget cap",
-    "queue 길이",
-    "cache 전략",
-    "rollback 규칙",
-    "canary 롤아웃",
-    "alerts 설정",
-    "로그 설계"
-]
+OPS_OBJECTS = ["예산 상한", "재시도", "지연", "큐", "로그", "롤백", "SLO"]
 
 
 BUCKETS = {
@@ -29,18 +10,32 @@ BUCKETS = {
 }
 
 
+_EN_VERBS = {"using", "develop", "create", "endpoints", "multimodal", "agents", "vlm"}
+
+
+def _english_word_count(text: str) -> int:
+    return len(re.findall(r"[A-Za-z]{2,}", text or ""))
+
+
+def _is_valid_subject(topic: str) -> bool:
+    t = (topic or "").strip()
+    if not t:
+        return False
+    if t in BUCKETS:
+        return False
+    if _english_word_count(t) > 0:
+        return False
+    tl = t.lower()
+    if any(v in tl for v in _EN_VERBS):
+        return False
+    if "|" in t or "…" in t or t.endswith("..."):
+        return False
+    return bool(re.search(r"[가-힣]", t))
+
+
 def generate_hook(subject: str) -> str:
     topic = (subject or "").strip()
-    if not topic:
-        topic = "AI 에이전트"
-    if topic in BUCKETS:
-        topic = "AI 에이전트"
-
-    # Optional safety: English-heavy subject fallback.
-    english_words = re.findall(r"\b[A-Za-z]+\b", topic)
-    if len(english_words) > 3:
-        topic = "AI 에이전트"
-
-    pattern = random.choice(HOOK_PATTERNS)
-    obj = random.choice(OBJECTS)
-    return pattern.format(topic=topic, object=obj)
+    if not _is_valid_subject(topic):
+        topic = "이번 글"
+    obj = random.choice(OPS_OBJECTS)
+    return f"사람들이 {topic}에서 제일 많이 착각하는 건 {obj}이다."

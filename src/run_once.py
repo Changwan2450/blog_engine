@@ -182,6 +182,7 @@ def _quality_gate_with_regen(
     summary,
     topic_hint: str,
     initial_drafts: list,
+    subject_kr: str = "",
 ) -> list:
     """Apply quality gate. If fewer than 2 pass, generate 2 more (max 5 total).
 
@@ -197,7 +198,7 @@ def _quality_gate_with_regen(
     # Regeneration pass: generate 2 more drafts
     print(f"[quality] Only {len(passed)}/{len(initial_drafts)} passed; "
           f"regenerating 2 more drafts …", file=sys.stderr)
-    extra = generate_drafts(summary, count=2, topic_hint=topic_hint)
+    extra = generate_drafts(summary, count=2, topic_hint=topic_hint, subject_kr=subject_kr)
     extra_passed = [d for d in extra if draft_passes_quality(d)]
     all_passed = passed + extra_passed
 
@@ -229,6 +230,41 @@ def _load_top_trend_terms(data_dir: Path, max_terms: int = 5) -> list[str]:
         ]
     except (json.JSONDecodeError, OSError):
         return []
+
+
+def _count_english_words(text: str) -> int:
+    return len(re.findall(r"[A-Za-z]{2,}", text or ""))
+
+
+def _clean_subject_kr(text: str) -> str:
+    t = (text or "").strip()
+    t = re.sub(r"\S*(?:\||…|\.\.\.)\S*", " ", t)
+    t = re.sub(r"(?:\b[A-Za-z][A-Za-z0-9&+\-_/]{1,}\b\s*){3,}", " ", t)
+    t = re.sub(r"\s+", " ", t).strip(" ,.;:-")
+    if not t:
+        return ""
+    if _count_english_words(t) > 0:
+        return ""
+    if any(w in t.lower() for w in ("using", "develop", "create", "endpoints", "multimodal", "agents", "vlm")):
+        return ""
+    if not re.search(r"[가-힣]", t):
+        return ""
+    return t[:24]
+
+
+def _derive_subject_kr(summary) -> str:
+    cand1 = _clean_subject_kr(getattr(summary, "topic_kr", "") or "")
+    if cand1:
+        return cand1
+    claims = list(getattr(summary, "key_claims", []) or [])
+    if claims:
+        cand2 = _clean_subject_kr(str(claims[0].get("claim", "") or ""))
+        if cand2:
+            return cand2
+    cand3 = _clean_subject_kr(getattr(summary, "topic_secondary", "") or "")
+    if cand3:
+        return cand3
+    return "이번 글"
 
 
 def _load_recent_runs(runs_path: Path, n: int = 60) -> list[dict]:
@@ -360,7 +396,7 @@ def _fetch_reader_markdown(original_url: str, timeout: int = 10) -> str:
     if not src:
         return ""
 
-    retries = max(0, _env_int("BLOG_READER_MAX_RETRIES", 1))
+    retries = max(0, _env_int("BLOG_READER_MAX_RETRIES", 0))
 
     def _attempt(url: str) -> str:
         for attempt in range(retries + 1):
@@ -490,10 +526,14 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
     items = _cap_items_for_summary(items, max_summary_items)
     print(f"[speed] summary_items={len(items)}", file=sys.stderr)
 
+    max_research_items = max(1, _env_int("BLOG_MAX_ITEMS_RESEARCH", 300))
+    items_for_research = items[:max_research_items]
+    print(f"[speed] research_items={len(items_for_research)}", file=sys.stderr)
+
     # --- 2. Research (extract writing patterns) ---
     print("[pipeline] 2/9  Extracting research patterns …", file=sys.stderr)
     try:
-        research_patterns = extract_patterns(items, data_dir / "research_patterns.json")
+        research_patterns = extract_patterns(items_for_research, data_dir / "research_patterns.json")
     except Exception as exc:
         print(f"[research] WARN  Pattern extraction failed ({exc}); skipping", file=sys.stderr)
         research_patterns = load_patterns(data_dir / "research_patterns.json")
@@ -532,19 +572,20 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
 
     # pick summary using topic hint (if any), otherwise the top summary
     target_summary = _pick_summary_by_topic(summaries_for_pick, topic_hint)
-    subject_for_hook = (
-        (getattr(target_summary, "topic_kr", "") or "").strip()
-        or (getattr(target_summary, "topic_secondary", "") or "").strip()
-        or (getattr(target_summary, "topic_en", "") or "").strip()
-        or (getattr(target_summary, "topic_primary", "") or "").strip()
-    )
-    hook_line = generate_hook(subject_for_hook)
+    subject_kr = _derive_subject_kr(target_summary)
+    if not re.search(r"[가-힣]", subject_kr):
+        subject_kr = "이번 글"
+    print(f"[subject] {subject_kr}", file=sys.stderr)
+    hook_line = generate_hook(subject_kr)
 
     # --- 5. Write (5 drafts) with topic_hint + research ---
-    print("[pipeline] 5/9  Generating 5 drafts …", file=sys.stderr)
-    drafts = generate_drafts(target_summary, count=5, topic_hint=topic_hint,
+    draft_count = max(1, _env_int("BLOG_DRAFTS", 3))
+    print(f"[speed] drafts={draft_count}", file=sys.stderr)
+    print(f"[pipeline] 5/9  Generating {draft_count} drafts …", file=sys.stderr)
+    drafts = generate_drafts(target_summary, count=draft_count, topic_hint=topic_hint,
                              research_patterns=research_patterns,
-                             hook_line=hook_line)
+                             hook_line=hook_line,
+                             subject_kr=subject_kr)
 
     # --- 5.5 Critic + one rewrite pass ---
     print("[pipeline] 5.5/9  Critic + rewrite …", file=sys.stderr)
@@ -597,7 +638,7 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
 
     # --- 6. Quality gate (+ optional regen) ---
     print("[pipeline] 6/9  Quality gate …", file=sys.stderr)
-    drafts = _quality_gate_with_regen(target_summary, topic_hint, drafts)
+    drafts = _quality_gate_with_regen(target_summary, topic_hint, drafts, subject_kr=subject_kr)
 
     # --- 7. Select (with expanded bandit scoring) ---
     print("[pipeline] 7/9  Selecting best draft …", file=sys.stderr)

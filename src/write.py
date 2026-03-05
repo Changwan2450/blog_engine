@@ -84,20 +84,20 @@ DOMAIN_TERMS: set[str] = {
 }
 
 _DOMAIN_CLAUSES = [
-    "— 오케스트레이션/스킬 관점",
-    "— 컨텍스트 비용 관점",
-    "— 에이전틱 워크플로우 관점",
-    "— 로컬 AI/온디바이스 관점",
-    "— MCP/도구 호출 관점",
+    "— 운영 제약 관점",
+    "— 계측/지표 관점",
+    "— 비용 구조 관점",
+    "— 배포 안정성 관점",
+    "— 복구 루프 관점",
 ]
 
 _DOMAIN_ANGLES = [
-    "AI 오케스트레이션 파이프라인의 비용 구조",
-    "컨텍스트 윈도우 압축과 토큰 비용 절감",
-    "MCP 기반 도구 호출과 스킬 등록 패턴",
-    "에이전틱 워크플로우 자동화의 실전 한계",
-    "로컬 AI 추론과 온디바이스 배포 전략",
-    "멀티 에이전트 시스템의 설계 트레이드오프",
+    "운영 제약과 복구 루프 설계",
+    "계측 지표 고정과 비용 통제",
+    "실전 배포에서의 장애 전파 차단",
+    "실험-검증 루프의 반복 속도 개선",
+    "큐/캐시/타임아웃 기본값 설계",
+    "경보 규칙과 롤백 기준의 실무 트레이드오프",
 ]
 
 
@@ -381,6 +381,38 @@ def _normalise_quotes(text: str) -> str:
     return text.translate(_QUOTE_TRANSLATION)
 
 
+def _count_english_words(s: str) -> int:
+    return len(re.findall(r"[A-Za-z]{2,}", s or ""))
+
+
+def _strip_english_fragments(s: str) -> str:
+    text = (s or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\S*(?:\||…|\.\.\.)\S*", " ", text)
+    text = re.sub(r"(?:\b[A-Za-z][A-Za-z0-9&+\-_/]{1,}\b\s*){3,}", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" ,.;:-")
+    if len(text) < 12:
+        return ""
+    return text
+
+
+def _kr_subject_clean(subject: str) -> str:
+    t = _strip_english_fragments(subject)
+    if not t:
+        return ""
+    low = t.lower()
+    if _count_english_words(t) > 0:
+        return ""
+    if "|" in t or "…" in t or t.endswith("..."):
+        return ""
+    if any(w in low for w in ("using", "develop", "create", "endpoints", "multimodal", "agents", "vlm")):
+        return ""
+    if not re.search(r"[가-힣]", t):
+        return ""
+    return t[:24].strip()
+
+
 def _truncate_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -391,6 +423,11 @@ def _truncate_text(text: str, limit: int) -> str:
 
 def _clean_evidence_text(text: str) -> str:
     t = re.sub(_EVIDENCE_ARTIFACT_RE, "", text or "")
+    stripped = _strip_english_fragments(t)
+    if stripped:
+        t = stripped
+    if _count_english_words(t) >= 3:
+        return ""
     t = re.sub(r"\s+", " ", t).strip(" ,.;:-")
     return t
 
@@ -414,11 +451,11 @@ def _narrative_evidence_sentence(ev: str, idx: int) -> str:
     if not e:
         e = "외부 공개 사례"
     variants = [
-        f"{e} 케이스를 보면 병목이 코드보다 운영 규칙에서 먼저 터진다.",
-        f"{e}에서도 비용 상한과 복구 규칙을 같이 설계한 팀이 장애 시간을 줄였다.",
-        f"{e} 사례는 retry와 timeout을 늦게 고치면 queue 적체가 바로 커진다는 점을 보여준다.",
-        f"{e}에서 확인된 패턴은 비슷하다: 지표 없이 확장하면 rollback 빈도부터 오른다.",
-        f"{e} 같은 공개 사례를 보면 성능 논쟁보다 운영 제약 설계가 더 먼저 이슈가 된다.",
+        f"{e}에서 터진 지점은 운영 임계치였다.",
+        f"{e}에서는 비용 상한과 복구 규칙이 비어 있어 장애 시간이 길어졌다.",
+        f"{e}에서 드러난 건 retry와 timeout이 비면 queue 적체가 바로 커진다는 사실이다.",
+        f"{e} 패턴은 단순하다. 지표 없이 확장하면 rollback 빈도부터 오른다.",
+        f"{e}의 핵심은 기능 수가 아니라 운영 제약의 빈칸이다.",
     ]
     return variants[idx % len(variants)]
 
@@ -445,16 +482,113 @@ def _detemplate_blog_text(text: str) -> str:
 
     out = text
     out = re.sub(r"(?ms)^##\s*오늘 핵심 정리.*?(?=^##\s|\Z)", "", out)
+    out = re.sub(r"(?ms)^##\s*(Summary|요약)\s*$.*?(?=^##\s|\Z)", "", out)
+    out = re.sub(r"\b(Develop|Using|Endpoints|NVIDIA\s+Technical\s+Blog|Create\s+Native|Multimodal|Agents|VLM)\b", "", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
     for p in banned_patterns:
         if re.search(p, out):
             out = re.sub(p, random.choice(replacements), out)
     return out
 
 
+def _subject_with_particle(subject: str) -> str:
+    s = (subject or "이 글").strip()
+    if not s:
+        return "이 글이"
+    last = s[-1]
+    if "가" <= last <= "힣":
+        has_final = (ord(last) - ord("가")) % 28 != 0
+        return s + ("이" if has_final else "가")
+    if s.endswith("글"):
+        return s + "이"
+    return s + "가"
+
+
 def _detemplate_output_blog_section(full_text: str) -> str:
     if not _ENABLE_DETEMPLATE_GUARD:
         return full_text
     return _detemplate_blog_text(full_text)
+
+
+_TOPIC_BUCKETS = {
+    "AI Infra", "Models", "DevTools", "Chips", "Security", "Web", "Product", "OpenSource", "Data", "Business"
+}
+
+
+def _is_bucket_subject(text: str) -> bool:
+    return (text or "").strip() in _TOPIC_BUCKETS
+
+
+def _derive_subject_kr(summary: TopicSummary) -> str:
+    tkr = _kr_subject_clean(str(getattr(summary, "topic_kr", "") or "").strip())
+    if tkr and not _is_bucket_subject(tkr):
+        return tkr
+
+    source_claim = ""
+    key_claims = list(getattr(summary, "key_claims", []) or [])
+    if key_claims:
+        source_claim = str(key_claims[0].get("claim", "") or "").strip()
+    source_subject = _kr_subject_clean(_title_subject(source_claim, fallback=""))
+    if source_subject:
+        return source_subject
+
+    sec = str(getattr(summary, "topic_secondary", "") or "").strip()
+    sec_clean = _kr_subject_clean(sec)
+    if sec_clean and not _is_bucket_subject(sec_clean):
+        return sec_clean
+
+    return "이 글"
+
+
+def _pick_korean_reason_a(key_claims: list[dict]) -> str:
+    joined = " ".join(
+        str(c.get("claim", "")) + " " + " ".join(str(e) for e in c.get("evidence", []))
+        for c in key_claims
+    )
+    low = joined.lower()
+    for k, v in (("모델", "모델"), ("성능", "성능"), ("tool", "도구"), ("도구", "도구"), ("기능", "기능")):
+        if k in low or k in joined:
+            return v
+    return random.choice(["기능", "모델", "성능", "도구"])
+
+
+def _pick_korean_reason_b(key_claims: list[dict]) -> str:
+    joined = " ".join(
+        str(c.get("claim", "")) + " " + " ".join(str(e) for e in c.get("evidence", []))
+        for c in key_claims
+    )
+    low = joined.lower()
+    pairs = [
+        ("retry", "재시도 규칙"),
+        ("timeout", "지연 한도"),
+        ("latency", "지연 한도"),
+        ("rollback", "롤백 절차"),
+        ("budget", "예산 상한"),
+        ("cost", "예산 상한"),
+        ("queue", "관측(로그/메트릭)"),
+        ("log", "관측(로그/메트릭)"),
+        ("metric", "관측(로그/메트릭)"),
+        ("slo", "관측(로그/메트릭)"),
+    ]
+    for k, v in pairs:
+        if k in low:
+            return v
+    return random.choice(["예산 상한", "재시도 규칙", "지연 한도", "롤백 절차", "관측(로그/메트릭)"])
+
+
+def _lock_subject_mentions(full_text: str, subject_kr: str, key_claims: list[dict]) -> str:
+    if not subject_kr or subject_kr == "AI 에이전트":
+        return full_text
+    claims_blob = " ".join(str(c.get("claim", "")) + " " + " ".join(str(e) for e in c.get("evidence", [])) for c in key_claims)
+    if "ai 에이전트" in claims_blob.lower():
+        return full_text
+
+    marker = "## X Thread"
+    if marker in full_text:
+        head, tail = full_text.split(marker, 1)
+        head = head.replace("AI 에이전트", subject_kr)
+        return head + marker + tail
+    return full_text.replace("AI 에이전트", subject_kr)
 
 
 def _extract_evidence(summary_text: str) -> list[str]:
@@ -587,7 +721,7 @@ _TITLE_LABEL_SUFFIXES = {
 
 _PRIMARY_FALLBACK_KR = {
     "AI Infra": "AI 인프라",
-    "Models": "AI 에이전트",
+    "Models": "AI 모델",
     "DevTools": "개발 도구",
     "Chips": "AI 칩",
     "Security": "프롬프트 공격",
@@ -605,7 +739,7 @@ _TITLE_BAD_END = {"of", "to", "for", "a"}
 def _english_subject_to_korean(text: str) -> str:
     low = (text or "").lower()
     if "agent" in low:
-        return "AI 에이전트"
+        return "에이전트 워크플로우"
     if "prompt" in low and ("attack" in low or "injection" in low):
         return "프롬프트 공격"
     if "multi" in low and "agent" in low:
@@ -653,7 +787,7 @@ def _title_subject(topic_kr: str, fallback: str = "") -> str:
     if not t:
         t = (fallback or "").strip()
     if not t:
-        t = "AI 에이전트"
+        t = "핵심 시스템"
     return t[:26].strip()
 
 
@@ -663,7 +797,7 @@ def _build_claim_title(topic_kr: str, hook: str, fallback_subject: str = "") -> 
         return f"{subj}에서 사람들이 착각하는 것"
     if hook == "S":
         return f"{subj}의 진짜 병목"
-    return f"{subj}가 망하는 진짜 이유"
+    return f"{subj} 실패의 진짜 이유"
 
 
 # ---------------------------------------------------------------------------
@@ -765,10 +899,11 @@ def _build_failure_cases(hook: str, lens_id: str, topic: str, weak_evidence: boo
     lens = LENSES[lens_id]
     lines = ["## 실패 사례와 한계", ""]
     lines.extend([
-        "마이크로 스토리: 4명 팀이 주간 예산 상한과 2초 지연 제한으로 자동화 루프를 붙였다.",
-        "첫 주에 실패 모드는 한 가지였다: 재시도 폭주로 큐가 밀리면서 장애가 연쇄 발생했다.",
-        "해결은 화려하지 않았다: 일일 비용 컷오프, 재시도 2회 제한, 수동 fallback 버튼을 넣었다.",
-        "교훈은 간단했다: 모델 교체보다 운영 제약 3개를 먼저 고정하는 편이 복구 시간을 줄였다.",
+        "4명 팀. 주간 예산 120만원.",
+        "제약은 timeout 2초 하나만 걸었다.",
+        "실패 모드: 재시도 폭주로 큐가 밀리며 알림이 연쇄로 울렸다.",
+        "수정: 재시도 2회 제한 + 롤백 버튼 + p95 경보 규칙 추가.",
+        "결과: 복구 시간 42분에서 16분으로 내려갔다.",
     ])
     if weak_evidence:
         lines.append("")
@@ -799,11 +934,10 @@ def _build_closing(hook: str, topic: str, domain_angle: str) -> str:
 
 
 def _build_tldr(topic_kr: str, key_claims: list[dict]) -> str:
-    subj = _title_subject(topic_kr)
-    sentence = (
-        f"사람들은 {subj}의 성패가 모델 성능 때문이라고 보지만 실제 병목은 비용 상한, "
-        "재시도 규칙, 지연 한도 같은 운영 제약이다."
-    )
+    subj = _kr_subject_clean(topic_kr) or "이 글"
+    a = _pick_korean_reason_a(key_claims)
+    b = _pick_korean_reason_b(key_claims)
+    sentence = f"사람들은 {_subject_with_particle(subj)} {a} 때문이라고 믿지만, 실전에서 더 자주 터지는 건 {b}다."
     return "## TL;DR\n\n" + _truncate_text(sentence, 130)
 
 
@@ -815,10 +949,10 @@ def _build_why_it_matters_fixed(
 ) -> str:
     lines = ["## Why it matters", ""]
     openers = [
-        f"{topic_kr}는 모델 스펙보다 운영 기준선을 어디에 두는지가 결과를 가른다.",
-        f"{topic_kr}는 화려한 데모보다 budget cap, retry count, timeout 같은 기본값 설계가 더 중요하다.",
-        f"{topic_kr}에서 큰 차이는 기능 수가 아니라 queue depth와 alert rule을 얼마나 빨리 잡느냐에서 난다.",
-        f"{topic_kr}는 속도 싸움처럼 보이지만 실제로는 rollback 규칙과 p95 관리에서 승패가 갈린다.",
+        f"{topic_kr}에서 자주 무너지는 건 모델이 아니라 운영 제약의 빈칸이다.",
+        f"{topic_kr}의 초반 실패는 queue depth, alert rule, retry 제한이 빠진 상태에서 시작된다.",
+        f"{topic_kr}는 새 기능 추가보다 rollback 절차와 p95 계측을 먼저 붙인 팀이 오래 버틴다.",
+        f"{topic_kr}에서 비용 폭주는 코드보다 운영 임계치 누락에서 먼저 터진다.",
     ]
     first_ev = ""
     if key_claims:
@@ -833,9 +967,9 @@ def _build_why_it_matters_fixed(
         lines.append("1) 7일간 p95 latency, retry count, queue depth를 수집해 병목 구간을 수치로 고정한다.")
         lines.append("2) canary 10%와 전체 배포를 비교해 rollback rate와 alert precision을 계산한다.")
     closers = [
-        domain_angle + " 관점에서 성능 논쟁보다 운영 루프의 재현성이 더 큰 차이를 만든다.",
-        domain_angle + " 프레임으로 보면 기능 추가보다 SLO/알림 규칙 고정이 실제 장애 시간을 줄인다.",
-        domain_angle + "에서는 빠른 도입보다 계측 가능한 실행 구조를 먼저 갖춘 팀이 덜 흔들린다.",
+        "여기서 터진다: 예산 상한, 재시도 규칙, 지연 한도.",
+        "대부분은 관측(로그/메트릭)부터 비어 있다.",
+        "결론은 간단하다: 롤백 절차와 경보 규칙을 먼저 적어 두면 장애 시간이 줄어든다.",
     ]
     lines.append(_truncate_text(random.choice(closers), 130))
     return "\n".join(lines)
@@ -862,8 +996,10 @@ def _build_sources_section(summary_urls: list[str], key_claims: list[dict]) -> s
     ev_lines: list[str] = []
     for kc in key_claims:
         for ev in kc.get("evidence", []) or []:
-            t = str(ev).strip()
+            t = _clean_evidence_text(str(ev).strip())
             if not t or _METADATA_FRAGMENT_RE.search(t):
+                continue
+            if _count_english_words(t) > 0:
                 continue
             if not _is_valid_evidence_snippet(t):
                 continue
@@ -1034,6 +1170,7 @@ def _build_article(
     summary_key_points: list[str] | None = None,
     key_claims: list[dict] | None = None,
     hook_line: str | None = None,
+    subject_kr: str | None = None,
 ) -> str:
     """Assemble blog article + X thread.
 
@@ -1041,6 +1178,7 @@ def _build_article(
     Fallback: template sections.
     """
     t_kr = topic_kr or topic
+    subject = _kr_subject_clean(subject_kr or t_kr or topic) or "이 글"
     domain_angle = _pick_domain_angle(topic + "|" + lens_id + "|" + topic_hint)
     lens = LENSES[lens_id]
 
@@ -1094,7 +1232,7 @@ def _build_article(
     prompt = (
         "다음 조건에 따라 두 가지 콘텐츠를 한 번에 작성하세요.\n\n"
         "주제(영문): " + topic + "\n"
-        "주제(한국어 제목으로 사용): " + t_kr + "\n"
+        "주제(한국어 제목으로 사용): " + subject + "\n"
         "분석 렌즈: " + lens["label"] + " 관점 — " + lens["question"] + "\n"
         "도메인 각도: " + domain_angle + "\n"
         "훅 스타일: " + hook_style.get(hook, hook_style["Q"]) + "\n"
@@ -1110,7 +1248,7 @@ def _build_article(
         "- 짧고 도발적인 hot take 문장 정확히 2개 포함 (X에 바로 인용 가능한 길이)\n"
         "- 마지막은 바로 써먹는 cheat code 한 줄로 마무리\n"
         "- 각 문단에는 최소 1개의 구체 객체를 넣을 것: budget cap, retry count, timeout, queue depth, p95, canary %, alert rule, cache hit ratio, SLO\n"
-        '- 제목/본문에서 "' + topic + '" 원문 표현은 최대 2회. 이후엔 "' + t_kr + '" 또는 동의어 사용.\n'
+        '- 제목/본문에서 "' + topic + '" 원문 표현은 최대 2회. 이후엔 "' + subject + '" 또는 동의어 사용.\n'
         '- 금지 표현: "단순했다", "요즘", "최근 몇 년", "무엇이 달라졌고", "이 주제", "승부는 기능 비교가 아니라", "예를 들어", "도입 속도보다", "먼저다"\n'
         '- 메타데이터 라벨 금지: "출처:", "URL 컨텍스트:", "관련 기술/기업:"\n'
         "- 약한 도발/가벼운 유머는 허용하지만 사실성은 유지\n"
@@ -1163,6 +1301,7 @@ def _build_article(
                             result = head + blog_marker + "\n\n" + hook_line + "\n\n" + rest
                 result = _cap_topic_repetitions(result, topic, t_kr, limit=2)
                 result = _enforce_x_limits_on_full_output(result)
+                result = _lock_subject_mentions(result, subject, safe_claims)
                 return _detemplate_output_blog_section(result)
             retry_prompt = (
                 prompt
@@ -1188,6 +1327,7 @@ def _build_article(
                         retried = h + "## BLOG ARTICLE (KR)\n\n" + hook_line + "\n\n" + r
                 retried = _cap_topic_repetitions(retried, topic, t_kr, limit=2)
                 retried = _enforce_x_limits_on_full_output(retried)
+                retried = _lock_subject_mentions(retried, subject, safe_claims)
                 return _detemplate_output_blog_section(retried)
             print("[write] WARN  LLM output too short (%d chars); using template" % len(retried), file=sys.stderr)
         except (URLError, KeyError, json.JSONDecodeError, RuntimeError, OSError) as exc:
@@ -1196,13 +1336,13 @@ def _build_article(
 
     # Template fallback
     hook_text = _build_hook(hook, t_kr, topic_hint, facts)
-    tldr = _build_tldr(t_kr, safe_claims)
-    why_fixed = _build_why_it_matters_fixed(t_kr, safe_claims, domain_angle, weak_evidence=weak_evidence)
+    tldr = _build_tldr(subject, safe_claims)
+    why_fixed = _build_why_it_matters_fixed(subject, safe_claims, domain_angle, weak_evidence=weak_evidence)
     thesis = _build_thesis(hook, lens_id, t_kr, domain_angle)
-    why = _build_why_it_matters(t_kr, facts, domain_angle, weak_evidence=weak_evidence)
-    checklist = _build_checklist(structure, t_kr)
-    failures = _build_failure_cases(hook, lens_id, t_kr, weak_evidence=weak_evidence)
-    closing = _build_closing(hook, t_kr, domain_angle)
+    why = _build_why_it_matters(subject, facts, domain_angle, weak_evidence=weak_evidence)
+    checklist = _build_checklist(structure, subject)
+    failures = _build_failure_cases(hook, lens_id, subject, weak_evidence=weak_evidence)
+    closing = _build_closing(hook, subject, domain_angle)
     sources_sec = _build_sources_section(source_urls or [], safe_claims)
 
     blog_section = "\n\n".join([
@@ -1223,6 +1363,7 @@ def _build_article(
     x_section = "## X Thread\n\n" + x_thread
     full_text = blog_section + "\n\n---\n\n" + x_section
     full_text = _cap_topic_repetitions(full_text, topic, t_kr, limit=2)
+    full_text = _lock_subject_mentions(full_text, subject, safe_claims)
     return _detemplate_output_blog_section(full_text)
 
 
@@ -1236,6 +1377,7 @@ def generate_drafts(
     topic_hint: str = "",
     research_patterns: dict | None = None,
     hook_line: str | None = None,
+    subject_kr: str | None = None,
 ) -> List[Draft]:
     """Create *count* draft articles with unique (Arm, Lens) combos.
 
@@ -1262,7 +1404,8 @@ def generate_drafts(
 
     topic_angle = getattr(summary, "topic_angle", "") or ""
     topic_primary = getattr(summary, "topic_primary", "") or "DevTools"
-    primary_fallback = _PRIMARY_FALLBACK_KR.get(topic_primary, "AI 에이전트")
+    primary_fallback = _PRIMARY_FALLBACK_KR.get(topic_primary, "핵심 시스템")
+    final_subject_kr = _kr_subject_clean(subject_kr or _derive_subject_kr(summary)) or "이 글"
 
     drafts: list[Draft] = []
     for idx, (arm, lens_id) in enumerate(chosen):
@@ -1270,6 +1413,9 @@ def generate_drafts(
         # Recompute lens-specific Korean title per-draft for H1 heading diversity.
         lens_label = LENSES[lens_id]["label"]
         per_draft_kr = _heuristic_topic_kr(summary.topic, lens_label)
+        per_draft_kr = _kr_subject_clean(per_draft_kr) or per_draft_kr
+        if _is_bucket_subject(per_draft_kr) or not _kr_subject_clean(per_draft_kr):
+            per_draft_kr = final_subject_kr
         title = _build_claim_title(per_draft_kr, hook, fallback_subject=primary_fallback)
 
         narrative_angle = hook_templates[idx] if idx < len(hook_templates) else ""
@@ -1284,6 +1430,7 @@ def generate_drafts(
             summary_key_points=evidence,
             key_claims=key_claims,
             hook_line=hook_line,
+            subject_kr=final_subject_kr,
         )
 
         hid  = _make_hook_id(narrative_angle, hook_templates) if narrative_angle else ""
