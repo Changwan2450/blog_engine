@@ -401,6 +401,15 @@ def _kr_subject_clean(subject: str) -> str:
     t = _strip_english_fragments(subject)
     if not t:
         return ""
+    tokens = [tok for tok in re.split(r"\s+", t) if tok]
+    deduped: list[str] = []
+    for tok in tokens:
+        if deduped and deduped[-1] == tok:
+            continue
+        deduped.append(tok)
+    t = " ".join(deduped).strip()
+    if len(t) < 4:
+        return ""
     low = t.lower()
     if re.fullmatch(r"(?:MCP|SLO|SRE|K8s|LLM|RAG)\s*[가-힣]{1,10}", t):
         return t[:24].strip()
@@ -451,15 +460,16 @@ def _is_valid_evidence_snippet(text: str) -> bool:
 def _narrative_evidence_sentence(ev: str, idx: int) -> str:
     e = _clean_evidence_text(ev)
     if not _is_valid_evidence_snippet(e):
-        e = "retry=2, timeout=2s, p95 1.9s"
+        fallbacks = ["retry 2회", "timeout 2초", "p95 2초", "budget cap 설정", "queue depth 200"]
+        e = fallbacks[idx % len(fallbacks)]
     if not e:
-        e = "budget cap, queue depth, cache hit ratio"
+        e = "cache hit ratio 80%"
     variants = [
-        f"{e}에서 터진 지점은 운영 임계치였다.",
-        f"{e}에서는 비용 상한과 복구 규칙이 비어 있어 장애 시간이 길어졌다.",
-        f"{e}에서 드러난 건 retry와 timeout이 비면 queue 적체가 바로 커진다는 사실이다.",
-        f"{e} 패턴은 단순하다. 지표 없이 확장하면 rollback 빈도부터 오른다.",
-        f"{e}의 핵심은 기능 수가 아니라 운영 제약의 빈칸이다.",
+        f"실무에서 먼저 깨지는 건 보통 {e}다.",
+        f"{e}부터 못 박으면 사고가 줄어든다.",
+        f"{e}를 늦게 정하면 queue 적체가 먼저 쌓인다.",
+        f"{e} 없이는 rollback 빈도가 빠르게 오른다.",
+        f"핵심은 기능 수가 아니라 {e} 같은 운영 제약이다.",
     ]
     return variants[idx % len(variants)]
 
@@ -476,6 +486,7 @@ def _detemplate_blog_text(text: str) -> str:
         r"최근\s*몇\s*년",
         r"무엇이\s*달라졌고",
         r"이\s*주제",
+        r"에서\s*터진\s*지점은",
     ]
     replacements = [
         "현장에서 실제로 갈리는 지점은 따로 있다",
@@ -629,6 +640,8 @@ def _pick_korean_reason_b(key_claims: list[dict]) -> str:
 
 def _lock_subject_mentions(full_text: str, subject_kr: str, key_claims: list[dict]) -> str:
     if not subject_kr or subject_kr == "AI 에이전트":
+        return full_text
+    if subject_kr.startswith("AI 에이전트"):
         return full_text
     claims_blob = " ".join(str(c.get("claim", "")) + " " + " ".join(str(e) for e in c.get("evidence", [])) for c in key_claims)
     if "ai 에이전트" in claims_blob.lower():

@@ -36,9 +36,23 @@ def _is_valid_subject(topic: str) -> bool:
     return bool(re.search(r"[가-힣]", t))
 
 
+def _clean_subject(topic: str) -> str:
+    raw = (topic or "").strip()
+    if not raw:
+        return ""
+    tokens = [tok for tok in re.split(r"\s+", raw) if tok]
+    deduped: list[str] = []
+    for tok in tokens:
+        if deduped and deduped[-1] == tok:
+            continue
+        deduped.append(tok)
+    out = " ".join(deduped).strip()
+    return out
+
+
 def generate_hook(subject: str) -> str:
-    topic = (subject or "").strip()
+    topic = _clean_subject(subject)
     if (not topic) or (topic in _VAGUE_SUBJECTS) or (not _is_valid_subject(topic)):
         topic = "AI 에이전트 운영"
     obj = random.choice(["retry", "timeout", "budget cap", "p95", "queue", "로그"])
-    return f"요즘 {topic} 얘기 많은데, 진짜 터지는 건 {obj}다."
+    return f"{topic} 얘기 많지만, 실제 사고는 {obj}에서 난다."
