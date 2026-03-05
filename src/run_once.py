@@ -258,13 +258,28 @@ def _derive_subject_kr(summary) -> str:
         return cand1
     claims = list(getattr(summary, "key_claims", []) or [])
     if claims:
-        cand2 = _clean_subject_kr(str(claims[0].get("claim", "") or ""))
+        source = " ".join(
+            [str(claims[0].get("claim", "") or "")]
+            + [str(e) for e in (claims[0].get("evidence", []) or [])]
+        )
+        m = re.search(r"[가-힣]{2,12}(?:\s*(?:AI|에이전트|보안|GPU|클라우드|모델|워크플로우|프로토콜|툴|API))?", source)
+        cand2 = _clean_subject_kr(m.group(0) if m else source)
         if cand2:
             return cand2
+        for ac, mapped in {
+            "MCP": "MCP 표준",
+            "SLO": "SLO 설계",
+            "SRE": "SRE 운영",
+            "K8s": "K8s 운영",
+            "LLM": "LLM 운영",
+            "RAG": "RAG 파이프라인",
+        }.items():
+            if re.search(r"\b" + re.escape(ac) + r"\b", source):
+                return mapped
     cand3 = _clean_subject_kr(getattr(summary, "topic_secondary", "") or "")
     if cand3:
         return cand3
-    return "이번 글"
+    return "AI 에이전트 운영"
 
 
 def _load_recent_runs(runs_path: Path, n: int = 60) -> list[dict]:
@@ -574,7 +589,7 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
     target_summary = _pick_summary_by_topic(summaries_for_pick, topic_hint)
     subject_kr = _derive_subject_kr(target_summary)
     if not re.search(r"[가-힣]", subject_kr):
-        subject_kr = "이번 글"
+        subject_kr = "AI 에이전트 운영"
     print(f"[subject] {subject_kr}", file=sys.stderr)
     hook_line = generate_hook(subject_kr)
 
