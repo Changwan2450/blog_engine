@@ -17,10 +17,9 @@ import re
 from dataclasses import dataclass, field
 from typing import List
 from urllib.parse import urlparse, urlunparse
-from urllib.request import Request, urlopen
 
 from collect import SourceItem
-from env_loader import get_model
+from openai_client import call_openai
 
 
 @dataclass
@@ -220,24 +219,14 @@ def rewrite_topic(raw: str, lens_label: str = "") -> dict:
         "No markdown, no extra keys."
     )
     try:
-        payload = json.dumps({
-            "model": get_model("summarize"),
-            "messages": [{"role": "user", "content": user_msg}],
-            "temperature": 0.3,
-            "max_tokens": 200,
-        }).encode()
-        req = Request(
-            "https://api.openai.com/v1/chat/completions",
-            data=payload,
-            headers={
-                "Authorization": "Bearer " + api_key,
-                "Content-Type": "application/json",
-            },
-            method="POST",
+        raw = call_openai(
+            stage="summarize",
+            system="You are a concise editor. Return strict JSON only.",
+            user=user_msg,
+            max_tokens=200,
+            temperature=0.3,
         )
-        with urlopen(req, timeout=20) as r:
-            data = json.loads(r.read().decode())
-        parsed = json.loads(data["choices"][0]["message"]["content"])
+        parsed = json.loads(raw)
         return {
             "topic_en": str(parsed.get("topic_en", en))[:80],
             "topic_kr": str(parsed.get("topic_kr", kr))[:45],

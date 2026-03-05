@@ -44,9 +44,8 @@ from pathlib import Path
 from typing import List
 from urllib.error import URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
-from env_loader import get_model
+from openai_client import call_openai
 from summarize import TopicSummary, _heuristic_topic_kr
 
 
@@ -201,8 +200,6 @@ def draft_passes_quality(draft: Draft) -> bool:
 # LLM integration — OpenAI-compatible API via urllib
 # ---------------------------------------------------------------------------
 
-_OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
-_OPENAI_TIMEOUT = 90  # seconds (longer for full blog+thread)
 _ENABLE_DETEMPLATE_GUARD = True
 
 _WRITER_SYSTEM_PROMPT = """You write Korean tech insight posts that feel like a sharp engineer’s take someone would share on X.
@@ -257,35 +254,14 @@ def _call_llm(
     max_tokens: int = 3000,
     stage: str = "write",
 ) -> str:
-    """Call OpenAI-compatible chat completion API via urllib."""
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not set")
-
-    payload = json.dumps({
-        "model": get_model(stage),
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_prompt},
-        ],
-        "temperature": 0.7,
-        "max_tokens": max_tokens,
-    }).encode("utf-8")
-
-    req = Request(
-        _OPENAI_API_URL,
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+    """Call shared OpenAI client (Responses API preferred)."""
+    return call_openai(
+        stage=stage,
+        system=system_prompt,
+        user=user_prompt,
+        max_tokens=max_tokens,
+        temperature=0.7,
     )
-
-    with urlopen(req, timeout=_OPENAI_TIMEOUT) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-
-    return data["choices"][0]["message"]["content"].strip()
 
 
 def generate_text(prompt: str, hook_line: str | None = None) -> str:

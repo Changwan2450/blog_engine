@@ -2,16 +2,11 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 from urllib.error import URLError
-from urllib.request import Request, urlopen
 
-from env_loader import get_model
+from openai_client import call_openai
 
-
-_OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
-_CRITIC_TIMEOUT = 35
 
 _CRITIC_SYSTEM_PROMPT = """You are a ruthless editor for Korean tech insight posts.
 
@@ -76,33 +71,13 @@ def _normalise_list(value: Any, max_items: int) -> list[str]:
 
 
 def _call_critic_llm(user_prompt: str) -> str:
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not set")
-
-    payload = json.dumps({
-        "model": get_model("critic"),
-        "messages": [
-            {"role": "system", "content": _CRITIC_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.3,
-        "max_tokens": 500,
-    }).encode("utf-8")
-
-    req = Request(
-        _OPENAI_API_URL,
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+    return call_openai(
+        stage="critic",
+        system=_CRITIC_SYSTEM_PROMPT,
+        user=user_prompt,
+        max_tokens=500,
+        temperature=0.3,
     )
-
-    with urlopen(req, timeout=_CRITIC_TIMEOUT) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"].strip()
 
 
 def critique_draft(draft_text: str, topic_kr: str, lens_label: str) -> dict:
