@@ -444,6 +444,7 @@ def _detemplate_blog_text(text: str) -> str:
     ]
 
     out = text
+    out = re.sub(r"(?ms)^##\s*오늘 핵심 정리.*?(?=^##\s|\Z)", "", out)
     for p in banned_patterns:
         if re.search(p, out):
             out = re.sub(p, random.choice(replacements), out)
@@ -453,10 +454,6 @@ def _detemplate_blog_text(text: str) -> str:
 def _detemplate_output_blog_section(full_text: str) -> str:
     if not _ENABLE_DETEMPLATE_GUARD:
         return full_text
-    marker = "## X Thread"
-    if marker in full_text:
-        head, tail = full_text.split(marker, 1)
-        return _detemplate_blog_text(head) + marker + tail
     return _detemplate_blog_text(full_text)
 
 

@@ -1,12 +1,4 @@
-"""render.py – Convert a Draft + TopicSummary into Naver-style blog markdown.
-
-Follows rules in docs/naver_style.md:
-  - Title: 26–34 characters
-  - Intro: 3–4 short sentences
-  - H2 sections: 핵심 요약 / 왜 중요한가 / 바로 적용하기
-  - Ending: checklist (오늘 핵심 정리)
-  - Metadata header for traceability
-"""
+"""render.py – Convert a Draft + TopicSummary into final markdown."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -60,15 +52,7 @@ def render_markdown(draft: Draft, summary: TopicSummary, timestamp: str = "") ->
         "## Sources",
     ]
     lines.extend([f"- {url}" for url in summary.source_urls])
-    lines.extend([
-        "",
-        "## 오늘 핵심 정리",
-        "",
-        "- AI 자동화는 반복 작업에 가장 강하다",
-        "- 작은 실험부터 시작하는 것이 중요하다",
-        "- 데이터 기반으로 개선해야 한다",
-        "",
-    ])
+    lines.append("")
     return "\n".join(lines)
 
 
