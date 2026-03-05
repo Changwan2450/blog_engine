@@ -10,6 +10,7 @@ data/trend_terms.json
 data/topic_pool.txt
 data/_sources_all.txt
 data/topic_memory.json
+data/reader_cache/
 
 # Python
 __pycache__/

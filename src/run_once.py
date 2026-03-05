@@ -36,10 +36,15 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(_PROJECT_ROOT / ".env")
 
 import argparse
+import concurrent.futures
+import hashlib
 import importlib.util
 import json
+import os
 import random
 import re
+import time
+from datetime import datetime
 from typing import Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -242,6 +247,59 @@ def _load_recent_runs(runs_path: Path, n: int = 60) -> list[dict]:
     return out
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _parse_ts(value: str) -> float:
+    v = (value or "").strip()
+    if not v:
+        return 0.0
+    try:
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+_SOURCE_DOMAIN_WEIGHT = {
+    "openai.com": 1.0,
+    "developer.nvidia.com": 1.0,
+    "aws.amazon.com": 1.0,
+    "github.blog": 0.9,
+    "blog.cloudflare.com": 0.9,
+    "netflixtechblog.com": 0.9,
+}
+
+
+def _source_quality(item) -> float:
+    d = urlparse(getattr(item, "url", "")).netloc.lower().replace("www.", "")
+    if d in _SOURCE_DOMAIN_WEIGHT:
+        return _SOURCE_DOMAIN_WEIGHT[d]
+    if any(h in d for h in ("engineering", "developer", "tech", "blog")):
+        return 0.5
+    return 0.1
+
+
+def _cap_items_for_summary(items: list, max_items: int) -> list:
+    indexed = list(enumerate(items))
+    ranked = sorted(
+        indexed,
+        key=lambda t: (
+            _source_quality(t[1]),
+            _parse_ts(getattr(t[1], "published_at", "") or ""),
+            -t[0],
+        ),
+        reverse=True,
+    )
+    return [it for _, it in ranked[:max_items]]
+
+
 # ---------------------------------------------------------------------------
 # Optional: trends integration (guarded import)
 # ---------------------------------------------------------------------------
@@ -302,34 +360,93 @@ def _fetch_reader_markdown(original_url: str, timeout: int = 10) -> str:
     if not src:
         return ""
 
+    retries = max(0, _env_int("BLOG_READER_MAX_RETRIES", 1))
+
+    def _attempt(url: str) -> str:
+        for attempt in range(retries + 1):
+            try:
+                txt = _fetch_text(url, timeout=timeout)
+                if len(txt.strip()) >= 500:
+                    return txt
+            except (HTTPError, URLError, OSError, ValueError):
+                if attempt >= retries:
+                    break
+        return ""
+
     defuddle_url = "https://defuddle.md/" + src
-    try:
-        text = _fetch_text(defuddle_url, timeout=timeout)
-        if len(text.strip()) >= 500:
-            return text
-    except (HTTPError, URLError, OSError, ValueError):
-        pass
+    text = _attempt(defuddle_url)
+    if text:
+        return text
 
     parsed = urlparse(src)
     no_scheme = src.split("://", 1)[1] if parsed.scheme in {"http", "https"} and "://" in src else src
     jina_url = "https://r.jina.ai/http://" + no_scheme
-    try:
-        text = _fetch_text(jina_url, timeout=timeout)
-        if len(text.strip()) >= 500:
-            return text
-    except (HTTPError, URLError, OSError, ValueError):
+    return _attempt(jina_url)
+
+
+def _reader_cache_path(cache_dir: Path, url: str) -> Path:
+    key = hashlib.sha1(url.encode("utf-8", errors="ignore")).hexdigest()
+    return cache_dir / f"{key}.md"
+
+
+def _read_reader_cache(cache_dir: Path, url: str, ttl_sec: int) -> str:
+    p = _reader_cache_path(cache_dir, url)
+    if not p.exists():
         return ""
-    return ""
+    age = time.time() - p.stat().st_mtime
+    if age > ttl_sec:
+        return ""
+    try:
+        txt = p.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return txt if len(txt.strip()) >= 500 else ""
 
 
-def _attach_reader_text(items, max_items: int = 20) -> None:
-    if not items:
+def _write_reader_cache(cache_dir: Path, url: str, text: str) -> None:
+    if len(text.strip()) < 500:
         return
-    ranked = sorted(items, key=lambda x: getattr(x, "score", 0.0), reverse=True)[:max_items]
-    for it in ranked:
-        text = _fetch_reader_markdown(getattr(it, "url", ""), timeout=10)
-        if text:
-            setattr(it, "reader_text", text)
+    p = _reader_cache_path(cache_dir, url)
+    try:
+        p.write_text(text, encoding="utf-8")
+    except OSError:
+        return
+
+
+def _attach_reader_text(items, data_dir: Path, max_items: int = 40) -> None:
+    if not items or max_items <= 0:
+        return
+
+    timeout_total = max(
+        _env_int("BLOG_READER_TIMEOUT_SEC", 10),
+        _env_int("BLOG_READER_CONNECT_TIMEOUT_SEC", 5),
+    )
+    max_workers = max(1, _env_int("BLOG_READER_MAX_WORKERS", 12))
+    cache_dir = data_dir / "reader_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_ttl_sec = 24 * 3600
+
+    targets = _cap_items_for_summary(list(items), max_items)
+
+    def _job(it):
+        u = getattr(it, "url", "")
+        cached = _read_reader_cache(cache_dir, u, ttl_sec=cache_ttl_sec)
+        if cached:
+            return it, cached
+        txt = _fetch_reader_markdown(u, timeout=timeout_total)
+        if txt:
+            _write_reader_cache(cache_dir, u, txt)
+        return it, txt
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(_job, it) for it in targets]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                it, txt = fut.result()
+            except Exception:
+                continue
+            if txt and len(txt.strip()) >= 500:
+                setattr(it, "reader_text", txt)
 
 
 def _extract_domains(urls: list[str]) -> list[str]:
@@ -369,6 +486,10 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
     if not items:
         print("[pipeline] WARN  No items collected; using fallback", file=sys.stderr)
 
+    max_summary_items = max(1, _env_int("BLOG_MAX_ITEMS_SUMMARY", 120))
+    items = _cap_items_for_summary(items, max_summary_items)
+    print(f"[speed] summary_items={len(items)}", file=sys.stderr)
+
     # --- 2. Research (extract writing patterns) ---
     print("[pipeline] 2/9  Extracting research patterns …", file=sys.stderr)
     try:
@@ -383,7 +504,9 @@ def run_once(project_root: Path, slot: str, seed: int | None = None) -> tuple[Pa
 
     # --- 4. Summarize ---
     print("[pipeline] 4/9  Summarizing …", file=sys.stderr)
-    _attach_reader_text(items, max_items=20)
+    max_reader_items = max(0, _env_int("BLOG_MAX_ITEMS_READER", 40))
+    print(f"[speed] reader_items={min(len(items), max_reader_items)}", file=sys.stderr)
+    _attach_reader_text(items, data_dir=data_dir, max_items=max_reader_items)
     summaries = summarize_items(items, top_n=10)
     if not summaries:
         raise RuntimeError("No summaries generated. Check source inputs.")
